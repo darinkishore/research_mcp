@@ -124,11 +124,7 @@ async def perform_exa_search(
         search_args["category"] = category
     if livecrawl:
         search_args["livecrawl"] = "always"
-    loop = asyncio.get_event_loop()
-    results: list[Result] = await loop.run_in_executor(
-        None, lambda: exa.search_and_contents(query_text, **search_args)
-    )
-
+    results: list[Result] = await asyncio.to_thread(exa.search_and_contents, query_text, **search_args)
     return results
 
 
@@ -184,21 +180,11 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         )
         row = cursor.fetchone()
 
+
     if not row:
         raise ValueError(f"Result not found: {result_id}")
 
-    (
-        title,
-        author,
-        content,
-        relevance_summary,
-        relevance_score,
-        purpose,
-        question,
-        query_text,
-        category,
-        livecrawl,
-    ) = row
+    title, author, content, summary, relevance_summary, relevance_score, purpose, question, query_text, category, livecrawl = row
 
     # Format the query details
     query_details = f"Query: {query_text}"
@@ -469,6 +455,12 @@ async def main():
             ),
         )
 
+def clean_author(author: str) -> str:
+    """Clean author name"""
+    if len(author) > 60:
+        return author[:60] + "..."
+    return author
+
 
 if __name__ == "__main__":
     import asyncio
@@ -530,11 +522,13 @@ if __name__ == "__main__":
         # 3. Test Exa search
         print("\nTesting Exa Search...")
         test_query = queries[0]  # Use first generated query
-        results = await perform_exa_search(
+        search_response: list[Result] = await perform_exa_search(
             query_text=test_query.text,
             category=test_query.category,
             livecrawl=test_query.livecrawl,
         )
+        results = search_response.results
+
         print(f"Found {len(results)} results")
         print(f"First result title: {results[0].title if results else 'No results'}")
         await inspect_db("Exa Search")
@@ -549,7 +543,7 @@ if __name__ == "__main__":
                 title=r.title,
                 score=r.score if hasattr(r, "score") else 0.0,
                 published_date=r.published_date if hasattr(r, "published_date") else "",
-                author=r.author if hasattr(r, "author") else "Unknown",
+                author=lambda: clean_author(r.author) if hasattr(r, "author") else "Unknown",
                 text=r.text,
                 highlights=r.highlights if hasattr(r, "highlights") else None,
                 highlight_scores=r.highlight_scores
@@ -608,6 +602,7 @@ if __name__ == "__main__":
                         json.dumps(raw.highlights),
                     ),
                 )
+
 
                 # Link query and result
                 cursor.execute(

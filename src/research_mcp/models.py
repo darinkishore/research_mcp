@@ -30,8 +30,8 @@ class SearchResultItem(BaseModel):
     id: str
     title: str
     score: float
-    published_date: str
-    author: str
+    published_date: str | None = None
+    author: str | None = None
     text: str
     highlights: Optional[list[str]] = None
     highlight_scores: Optional[list[float]] = None
