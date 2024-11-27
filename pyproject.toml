@@ -1,0 +1,26 @@
+[project]
+name = "research-mcp"
+version = "0.1.0"
+description = "A MCP server project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+ "clean-text[gpl]>=0.6.0",
+ "dspy>=2.5.40",
+ "exa-py>=1.7.0",
+ "fastapi>=0.115.5",
+ "httpx>=0.27.2",
+ "mcp>=1.0.0",
+ "python-dotenv>=1.0.1",
+ "uvicorn>=0.32.1",
+]
+[[project.authors]]
+name = "Darin"
+email = "86675935+darinkishore@users.noreply.github.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+research-mcp = "research_mcp:main"
