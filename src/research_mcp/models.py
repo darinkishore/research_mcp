@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -18,15 +17,13 @@ ExaCategory = Literal[
 ]
 
 
-@dataclass
-class ExaQuery:
+class ExaQuery(BaseModel):
     text: str
     category: Optional[ExaCategory] = None
     livecrawl: bool = False
 
 
-@dataclass
-class ExaResult:
+class SearchResultItem(BaseModel):
     """Represents a single result from Exa search"""
 
     url: str
@@ -40,8 +37,7 @@ class ExaResult:
     highlight_scores: Optional[list[float]] = None
 
 
-@dataclass
-class CleanedContent:
+class CleanedContent(BaseModel):
     title: str
     author: str
     url: str
@@ -67,3 +63,34 @@ class QueryRequest(BaseModel):
         ...,
         description="what do you want to know, more specifically? use natural language, be descriptive.",
     )
+
+
+class QueryResults(BaseModel):
+    """Groups together raw and processed results for a single query"""
+
+    query_id: int
+    query: ExaQuery
+    raw_results: list[SearchResultItem]
+    processed_results: list[CleanedContent]
+
+    class Config:
+        arbitrary_types_allowed = True  # Needed for ExaQuery which is still a dataclass
+
+
+class ResearchResults(BaseModel):
+    """Container for all results from a research request"""
+
+    purpose: str = Field(..., description="Original research purpose")
+    question: str = Field(..., description="Original research question")
+    query_results: list[QueryResults]
+
+    def all_raw_results(self) -> list[SearchResultItem]:
+        """Flatten all raw results into a single list"""
+        return [result for qr in self.query_results for result in qr.raw_results]
+
+    def all_processed_results(self) -> list[CleanedContent]:
+        """Flatten all processed results into a single list"""
+        return [result for qr in self.query_results for result in qr.processed_results]
+
+    class Config:
+        arbitrary_types_allowed = True  # Needed for nested dataclass types

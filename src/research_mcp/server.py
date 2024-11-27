@@ -1,18 +1,20 @@
 import asyncio
+import json
 import os
 import sqlite3
 
 import dotenv
 import mcp
 import mcp.types as types
+import stackprinter
 from exa_py import Exa
 from exa_py.api import Result
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
 
-from research_mcp.clean_content import ExaResult, clean_content
-from research_mcp.models import CleanedContent, QueryRequest
+from research_mcp.clean_content import SearchResultItem, clean_content
+from research_mcp.models import QueryRequest, QueryResults, ResearchResults
 from research_mcp.query_generation import generate_queries
 from research_mcp.word_ids import WordIDGenerator
 
@@ -20,6 +22,8 @@ from research_mcp.word_ids import WordIDGenerator
 
 # Load environment variables
 dotenv.load_dotenv()
+stackprinter.set_excepthook(style="darkbg2")
+
 
 # Initialize Exa client
 exa = Exa(os.getenv("EXA_API_KEY"))
@@ -100,11 +104,15 @@ conn.commit()
 # Initialize Word ID Generator
 word_id_generator = WordIDGenerator(conn)
 
+# Add near the top after initialization
+assert os.getenv("EXA_API_KEY"), "EXA_API_KEY environment variable must be set"
+
 
 async def perform_exa_search(
     query_text: str, category: str | None = None, livecrawl: bool = False
 ) -> list[Result]:
     """Perform Exa search asynchronously."""
+    assert query_text.strip(), "Query text cannot be empty"
     search_args = {
         "highlights": True,
         "num_results": 10,
@@ -124,9 +132,6 @@ async def perform_exa_search(
     return results
 
 
-# Store notes as a simple key-value dict to demonstrate state management
-notes: dict[str, str] = {}
-
 server = Server("research_mcp")
 
 
@@ -138,7 +143,7 @@ async def handle_list_resources() -> list[types.Resource]:
         cursor.execute("""
             SELECT id, title, summary 
             FROM results 
-            ORDER BY created_at DESC 
+            ORDER BY relevance_score DESC, created_at DESC 
             LIMIT 25  -- Maintain reasonable context size
         """)
         rows = cursor.fetchall()
@@ -156,70 +161,79 @@ async def handle_list_resources() -> list[types.Resource]:
 
 @server.read_resource()
 async def handle_read_resource(uri: AnyUrl) -> str:
-    """
-    Read a specific note's content by its URI.
-    The note name is extracted from the URI host component.
-    """
-    if uri.scheme != "note":
-        raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
+    """Read full content of a specific result."""
+    if not str(uri).startswith("research://results/"):
+        raise ValueError(f"Unsupported URI scheme: {uri}")
 
-    name = uri.path
-    if name is not None:
-        name = name.lstrip("/")
-        return notes[name]
-    raise ValueError(f"Note not found: {name}")
+    result_id = str(uri).split("/")[-1]
 
-
-@server.list_prompts()
-async def handle_list_prompts() -> list[types.Prompt]:
-    """
-    List available prompts.
-    Each prompt can have optional arguments to customize its behavior.
-    """
-    return [
-        types.Prompt(
-            name="summarize-notes",
-            description="Creates a summary of all notes",
-            arguments=[
-                types.PromptArgument(
-                    name="style",
-                    description="Style of the summary (brief/detailed)",
-                    required=False,
-                )
-            ],
+    async with db_lock:
+        cursor.execute(
+            """
+            SELECT 
+                r.title, r.author, r.cleaned_content, r.summary,
+                r.relevance_summary, r.relevance_score,
+                r.query_purpose, r.query_question,
+                q.query_text, q.category, q.livecrawl
+            FROM results r
+            JOIN query_results qr ON r.id = qr.result_id
+            JOIN exa_queries q ON qr.query_id = q.id
+            WHERE r.id = ?
+        """,
+            (result_id,),
         )
-    ]
+        row = cursor.fetchone()
 
+    if not row:
+        raise ValueError(f"Result not found: {result_id}")
 
-@server.get_prompt()
-async def handle_get_prompt(
-    name: str, arguments: dict[str, str] | None
-) -> types.GetPromptResult:
-    """
-    Generate a prompt by combining arguments with server state.
-    The prompt includes all current notes and can be customized via arguments.
-    """
-    if name != "summarize-notes":
-        raise ValueError(f"Unknown prompt: {name}")
+    (
+        title,
+        author,
+        content,
+        relevance_summary,
+        relevance_score,
+        purpose,
+        question,
+        query_text,
+        category,
+        livecrawl,
+    ) = row
 
-    style = (arguments or {}).get("style", "brief")
-    detail_prompt = " Give extensive details." if style == "detailed" else ""
+    # Format the query details
+    query_details = f"Query: {query_text}"
+    if category:
+        query_details += f"\nCategory: {category}"
+    if livecrawl:
+        query_details += "\nWith live crawling enabled"
 
-    return types.GetPromptResult(
-        description="Summarize the current notes",
-        messages=[
-            types.PromptMessage(
-                role="user",
-                content=types.TextContent(
-                    type="text",
-                    text=f"Here are the current notes to summarize:{detail_prompt}\n\n"
-                    + "\n".join(
-                        f"- {name}: {content}" for name, content in notes.items()
-                    ),
-                ),
-            )
-        ],
-    )
+    return f"""# [{result_id}]
+## Title: {title}
+
+**Author:** {author}
+<context>
+## Original Query Context
+
+This is why we were looking for this information:
+
+**Purpose:** {purpose}
+**Question:** {question}
+
+This is what was searched to find this information:
+
+{query_details}
+
+Relevance Score: {relevance_score}
+Relevance to Query: {relevance_summary}
+
+</context>
+
+## Full Content
+
+<content>
+{content}
+</content>
+"""
 
 
 @server.list_tools()
@@ -286,117 +300,153 @@ async def handle_call_tool(
 
     try:
         # Generate optimized queries based on purpose and question
-        queries = await generate_queries(purpose=purpose, question=question)
+        search_queries = await generate_queries(purpose=purpose, question=question)
+        assert search_queries, "No search queries were generated"
 
-        # Execute all queries concurrently
-        search_tasks = []
-        for query in queries:
-            task: list[Result] = perform_exa_search(
-                query_text=query.text,
-                category=query.category,
-                livecrawl=query.livecrawl,
-            )
-            search_tasks.append(task)
-            print(task[0].title)
-        search_results_list: list[list[Result]] = await asyncio.gather(*search_tasks)
+        # Initialize our research results container
+        research_results = ResearchResults(
+            purpose=purpose, question=question, query_results=[]
+        )
 
-        # Convert raw results to ExaResult objects
-        raw_results: list[list[ExaResult]] = [
-            [
-                ExaResult(
-                    url=result.url,
-                    id=result.id,
-                    title=result.title,
-                    score=result.score,
-                    published_date=result.published_date,
-                    author=result.author,
-                    text=result.text,
-                    highlights=result.highlights,
-                    highlight_scores=result.highlight_scores,
-                )
-                for result in results
-            ]
-            for results in search_results_list
-        ]
-        # ensure ExaResults sorted by score, highest first
-        for results in raw_results:
-            results.sort(key=lambda x: x.score, reverse=True)
-
-        # create ids for them
-        for results in raw_results:
-            for result in results:
-                result.id = await word_id_generator.generate_result_id()
-
-        # Clean and process results
-        cleaned_content_list: list[list[CleanedContent]] = [
-            await clean_content(
-                original_query=QueryRequest(purpose=purpose, question=question),
-                content=results,
-            )
-            for results in raw_results
-        ]
-
-        # Store results and generate summaries
-        summaries = []
-        for content in cleaned_content_list:
-            # Generate unique word ID
-            result_id = await word_id_generator.generate_result_id()
-
-            # Store in database with all fields
+        # Process each query and collect results
+        for search_query in search_queries:
+            # Store query in database
             async with db_lock:
                 cursor.execute(
                     """
-                    INSERT INTO results (
-                        id, 
-                        title, 
-                        author, 
-                        url,
-                        summary, 
-                        relevance_summary,
-                        full_text, 
-                        cleaned_content,
-                        query_purpose, 
-                        query_question,
-                        created_at,
-                        exa_id,
-                        raw_highlights
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                """,
-                    (
-                        result_id,
-                        content.title,
-                        content.author,
-                        content.url,
-                        content.summary,
-                        content.relevance_summary,
-                        content.text,  # Original full text
-                        content.content,  # Cleaned/dense version
-                        purpose,
-                        question,
-                    ),
+                    INSERT INTO exa_queries (query_text, category, livecrawl)
+                    VALUES (?, ?, ?)
+                    RETURNING id
+                    """,
+                    (search_query.text, search_query.category, search_query.livecrawl),
                 )
+                query_id = cursor.fetchone()[0]
                 conn.commit()
 
-            # Format summary for output in markdown
-            summaries.append(f"""\
-# [{result_id}] {content.title}
-**Author:** {content.author}
+            # Execute search
+            exa_results = await perform_exa_search(
+                query_text=search_query.text,
+                category=search_query.category,
+                livecrawl=search_query.livecrawl,
+            )
 
-## Relevance to Your Query
-{content.relevance_summary}
+            # Convert to our models
+            raw_results = [
+                SearchResultItem(
+                    url=r.url,
+                    id=await word_id_generator.generate_result_id(),
+                    title=r.title,
+                    score=r.score,
+                    published_date=r.published_date,
+                    author=r.author,
+                    text=r.text,
+                    highlights=r.highlights,
+                    highlight_scores=r.highlight_scores,
+                )
+                for r in exa_results
+            ]
 
-## Summary
-{content.summary}
+            # Process the results
+            processed_results = await clean_content(
+                original_query=QueryRequest(purpose=purpose, question=question),
+                content=raw_results,
+            )
+
+            # Add to our research results
+            research_results.query_results.append(
+                QueryResults(
+                    query_id=query_id,
+                    query=search_query,
+                    raw_results=raw_results,
+                    processed_results=processed_results,
+                )
+            )
+
+        # Store all results in database
+        async with db_lock:
+            for query_result in research_results.query_results:
+                for raw_result, processed_result in zip(
+                    query_result.raw_results, query_result.processed_results
+                ):
+                    if not hasattr(raw_result, "id") or not raw_result.id:
+                        raw_result.id = await word_id_generator.generate_result_id()
+
+                    cursor.execute(
+                        """
+                        INSERT INTO results (
+                            id, title, author, url, summary, relevance_summary,
+                            full_text, cleaned_content, relevance_score,
+                            query_purpose, query_question, exa_id, raw_highlights,
+                            metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            raw_result.id,
+                            processed_result.title,
+                            processed_result.author,
+                            processed_result.url,
+                            processed_result.summary,
+                            processed_result.relevance_summary,
+                            raw_result.text,
+                            processed_result.content,
+                            raw_result.score,
+                            purpose,
+                            question,
+                            raw_result.id,
+                            json.dumps(raw_result.highlights),
+                            json.dumps(
+                                {
+                                    "published_date": raw_result.published_date,
+                                    "highlight_scores": raw_result.highlight_scores,
+                                }
+                            ),
+                        ),
+                    )
+
+                    # Link result to query
+                    cursor.execute(
+                        """
+                        INSERT INTO query_results (query_id, result_id)
+                        VALUES (?, ?)
+                        """,
+                        (query_result.query_id, raw_result.id),
+                    )
+            conn.commit()
+
+        # Generate summaries for output, grouped by query
+        summaries = []
+        for query_result in research_results.query_results:
+            # Add query header
+            summaries.append(
+                f"""
+# Results for Query: {query_result.query.text}
+{"Category: " + query_result.query.category if query_result.query.category else ""}
+""".strip()
+            )
+
+            # Add results for this query
+            for raw_result, processed_result in zip(
+                query_result.raw_results, query_result.processed_results
+            ):
+                summaries.append(f"""\
+## [{raw_result.id}] {processed_result.title}
+**Author:** {processed_result.author}
+
+### Relevance to Your Query
+{processed_result.relevance_summary}
+
+### Summary
+{processed_result.summary}
 """)
 
         # Notify clients that new resources are available
         await server.request_context.session.send_resource_list_changed()
 
-        # Return formatted summaries
         return [types.TextContent(type="text", text="\n\n".join(summaries))]
 
     except Exception as e:
-        # Log the error and return a meaningful message
         print(f"Error during search: {str(e)}")
         return [
             types.TextContent(type="text", text=f"Error performing research: {str(e)}")
@@ -418,3 +468,172 @@ async def main():
                 ),
             ),
         )
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    from research_mcp.models import QueryRequest
+
+    async def inspect_db(section: str):
+        """Helper to inspect database state after each step"""
+        print(f"\n=== Database State After {section} ===")
+        async with db_lock:
+            print("\nExa Queries:")
+            cursor.execute(
+                "SELECT id, query_text, category, livecrawl FROM exa_queries"
+            )
+            queries = cursor.fetchall()
+            for q in queries:
+                print(f"ID: {q[0]}, Query: {q[1]}, Category: {q[2]}, LiveCrawl: {q[3]}")
+
+            print("\nResults:")
+            cursor.execute("SELECT id, title, author, relevance_score FROM results")
+            results = cursor.fetchall()
+            for r in results:
+                print(f"ID: {r[0]}, Title: {r[1]}, Author: {r[2]}, Score: {r[3]}")
+
+            print("\nQuery-Result Links:")
+            cursor.execute("""
+                SELECT eq.query_text, r.id, r.title 
+                FROM query_results qr 
+                JOIN exa_queries eq ON qr.query_id = eq.id 
+                JOIN results r ON qr.result_id = r.id
+            """)
+            links = cursor.fetchall()
+            for l in links:
+                print(f"Query: {l[0]}, Result: {l[1]} ({l[2]})")
+
+    async def test_components():
+        print("\n=== Testing Individual Components ===\n")
+
+        # 1. Test word ID generation
+        print("Testing Word ID Generation...")
+        test_id = await word_id_generator.generate_result_id()
+        print(f"Generated ID: {test_id}")
+        await inspect_db("Word ID Generation")
+
+        # 2. Test query generation
+        print("\nTesting Query Generation...")
+        test_purpose = "I'm writing a paper about AI safety"
+        test_question = "What are the main concerns about large language models?"
+        queries = await generate_queries(purpose=test_purpose, question=test_question)
+        print("Generated Queries:")
+        for q in queries:
+            print(f"- {q.text}")
+            if q.category:
+                print(f"  Category: {q.category}")
+            if q.livecrawl:
+                print("  With livecrawl")
+        await inspect_db("Query Generation")
+
+        # 3. Test Exa search
+        print("\nTesting Exa Search...")
+        test_query = queries[0]  # Use first generated query
+        results = await perform_exa_search(
+            query_text=test_query.text,
+            category=test_query.category,
+            livecrawl=test_query.livecrawl,
+        )
+        print(f"Found {len(results)} results")
+        print(f"First result title: {results[0].title if results else 'No results'}")
+        await inspect_db("Exa Search")
+
+        # 4. Test content cleaning
+        print("\nTesting Content Cleaning...")
+        query_request = QueryRequest(purpose=test_purpose, question=test_question)
+        raw_results = [
+            SearchResultItem(
+                url=r.url,
+                id=await word_id_generator.generate_result_id(),  # Generate unique IDs
+                title=r.title,
+                score=r.score if hasattr(r, "score") else 0.0,
+                published_date=r.published_date if hasattr(r, "published_date") else "",
+                author=r.author if hasattr(r, "author") else "Unknown",
+                text=r.text,
+                highlights=r.highlights if hasattr(r, "highlights") else None,
+                highlight_scores=r.highlight_scores
+                if hasattr(r, "highlight_scores")
+                else None,
+            )
+            for r in results[:2]  # Just test with first two results
+        ]
+        cleaned_results = await clean_content(query_request, raw_results)
+        print(f"Cleaned {len(cleaned_results)} results")
+        if cleaned_results:
+            print("First cleaned result:")
+            print(f"Title: {cleaned_results[0].title}")
+            print(f"Author: {cleaned_results[0].author}")
+            print(f"Relevance: {cleaned_results[0].relevance_summary[:100]}...")
+        await inspect_db("Content Cleaning")
+
+        # 5. Test database operations
+        print("\nTesting Database Operations...")
+        async with db_lock:
+            # Store a test query
+            cursor.execute(
+                """
+                INSERT INTO exa_queries (query_text, category, livecrawl)
+                VALUES (?, ?, ?) RETURNING id
+                """,
+                (test_query.text, test_query.category, test_query.livecrawl),
+            )
+            query_id = cursor.fetchone()[0]
+
+            # Store a test result
+            if cleaned_results:
+                result = cleaned_results[0]
+                raw = raw_results[0]
+                cursor.execute(
+                    """
+                    INSERT INTO results (
+                        id, title, author, url, summary, relevance_summary,
+                        full_text, cleaned_content, relevance_score,
+                        query_purpose, query_question, exa_id, raw_highlights
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        raw.id,
+                        result.title,
+                        result.author,
+                        result.url,
+                        result.summary,
+                        result.relevance_summary,
+                        raw.text,
+                        result.content,
+                        raw.score,
+                        test_purpose,
+                        test_question,
+                        raw.id,
+                        json.dumps(raw.highlights),
+                    ),
+                )
+
+                # Link query and result
+                cursor.execute(
+                    """
+                    INSERT INTO query_results (query_id, result_id)
+                    VALUES (?, ?)
+                    """,
+                    (query_id, raw.id),
+                )
+            conn.commit()
+        await inspect_db("Database Operations")
+
+        # 6. Test resource retrieval
+        print("\nTesting Resource Retrieval...")
+        resources = await handle_list_resources()
+        print(f"Listed {len(resources)} resources")
+        if resources:
+            print("\nTesting Resource Reading...")
+            first_uri = resources[0].uri
+            content = await handle_read_resource(first_uri)
+            print(f"Retrieved content length: {len(content)}")
+            print("\nFirst 200 chars of content:")
+            print(content[:200])
+        await inspect_db("Resource Retrieval")
+
+        print("\n=== All Tests Complete ===\n")
+
+    # Run all tests
+    asyncio.run(test_components())
