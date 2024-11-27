@@ -124,7 +124,9 @@ async def perform_exa_search(
         search_args["category"] = category
     if livecrawl:
         search_args["livecrawl"] = "always"
-    results: list[Result] = await asyncio.to_thread(exa.search_and_contents, query_text, **search_args)
+    results: list[Result] = await asyncio.to_thread(
+        exa.search_and_contents, query_text, **search_args
+    )
     return results
 
 
@@ -180,11 +182,22 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         )
         row = cursor.fetchone()
 
-
     if not row:
         raise ValueError(f"Result not found: {result_id}")
 
-    title, author, content, summary, relevance_summary, relevance_score, purpose, question, query_text, category, livecrawl = row
+    (
+        title,
+        author,
+        content,
+        summary,
+        relevance_summary,
+        relevance_score,
+        purpose,
+        question,
+        query_text,
+        category,
+        livecrawl,
+    ) = row
 
     # Format the query details
     query_details = f"Query: {query_text}"
@@ -455,6 +468,7 @@ async def main():
             ),
         )
 
+
 def clean_author(author: str) -> str:
     """Clean author name"""
     if len(author) > 60:
@@ -543,7 +557,9 @@ if __name__ == "__main__":
                 title=r.title,
                 score=r.score if hasattr(r, "score") else 0.0,
                 published_date=r.published_date if hasattr(r, "published_date") else "",
-                author=lambda: clean_author(r.author) if hasattr(r, "author") else "Unknown",
+                author=lambda: clean_author(r.author)
+                if hasattr(r, "author")
+                else "Unknown",
                 text=r.text,
                 highlights=r.highlights if hasattr(r, "highlights") else None,
                 highlight_scores=r.highlight_scores
@@ -552,6 +568,7 @@ if __name__ == "__main__":
             )
             for r in results[:2]  # Just test with first two results
         ]
+        # IT WORKS BABY
         cleaned_results = await clean_content(query_request, raw_results)
         print(f"Cleaned {len(cleaned_results)} results")
         if cleaned_results:
@@ -602,7 +619,6 @@ if __name__ == "__main__":
                         json.dumps(raw.highlights),
                     ),
                 )
-
 
                 # Link query and result
                 cursor.execute(
