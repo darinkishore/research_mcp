@@ -1,6 +1,7 @@
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
 
 # Define valid categories from README
 ExaCategory = Literal[
@@ -19,7 +20,7 @@ ExaCategory = Literal[
 
 class ExaQuery(BaseModel):
     text: str
-    category: Optional[ExaCategory] = None
+    category: ExaCategory | None = None
     livecrawl: bool = False
 
 
@@ -33,8 +34,8 @@ class SearchResultItem(BaseModel):
     published_date: str | None = None
     author: str | None = None
     text: str
-    highlights: Optional[list[str]] = None
-    highlight_scores: Optional[list[float]] = None
+    highlights: list[str] | None = None
+    highlight_scores: list[float] | None = None
 
 
 class CleanedContent(BaseModel):
