@@ -57,14 +57,10 @@ def format_resource_content(
     title: str,
     author: str | None,
     content: str,
-    published_date: datetime | None = None,
+    published_date: str | None = None,
 ) -> str:
     """Format the content for a resource."""
-    date_element = (
-        f'\n<published_date>{published_date.strftime("%Y-%m-%d")}</published_date>'
-        if published_date
-        else ''
-    )
+    date_element = f'\n<published_date>{published_date}</published_date>' if published_date else ''
     return f"""<resource id="{result_id}">
 <title>{title}</title>
 

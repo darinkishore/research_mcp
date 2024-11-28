@@ -32,7 +32,7 @@ from research_mcp.schemas import (
     get_search_tool_schema,
     wrap_in_results_tag,
 )
-from research_mcp.summarize import SearchResultItem, clean_content
+from research_mcp.summarize import SearchResultItem, summarize_search_items
 from research_mcp.word_ids import WordIDGenerator
 
 
@@ -235,7 +235,7 @@ async def handle_call_tool(
         # Now process all content cleaning concurrently
         cleaning_tasks = []
         for query_result in raw_query_results:
-            cleaning_task = clean_content(
+            cleaning_task = summarize_search_items(
                 original_query=QueryRequest(purpose=purpose, question=question),
                 content=query_result.raw_results,
             )
