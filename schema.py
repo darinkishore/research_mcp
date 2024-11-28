@@ -1,7 +1,7 @@
 import json
+from pathlib import Path
 
 from main import ChatHeader, Message
-
 
 # Get JSON schemas from Pydantic models
 chat_header_schema = ChatHeader.model_json_schema()
@@ -17,7 +17,7 @@ full_schema = {
 }
 
 # Write schema to file
-with open('schema.json', 'w') as f:
+with Path('schema.json').open('w', encoding='utf-8') as f:
     json.dump(full_schema, f, indent=2)
 
 if __name__ == '__main__':

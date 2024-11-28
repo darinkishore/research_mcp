@@ -3,10 +3,12 @@ name = "research-mcp"
 version = "0.1.0"
 description = "A MCP server project"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20.0",
+    "async-lru>=2.0.4",
     "braintrust>=0.0.173",
+    "cachier>=3.1.2",
     "clean-text[gpl]>=0.6.0",
     "dspy>=2.5.40",
     "exa-py>=1.7.0",
@@ -20,6 +22,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.36",
     "stackprinter>=0.2.12",
     "uvicorn>=0.32.1",
+    "uvloop>=0.21.0",
 ]
 
 
@@ -35,34 +38,67 @@ build-backend = "hatchling.build"
 research-mcp = "research_mcp:main"
 
 [tool.ruff]
-# Target Python 3.11
-target-version = "py311"
+# Target Python 3.12
+target-version = "py312"
 
 # Line length of 100 characters
 line-length = 100
 
-# Enable select rules
+
+[tool.ruff.lint]
+preview = true
 select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade
-    "N",   # pep8-naming
-    "SIM", # flake8-simplify
-    "RUF",
-]
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+    "PL",   # pylint
+    "PLR",
+    "PLE",
+    "PLW",
+    "PT",   # pytest
+    "PTH",  # use pathlib
+    "C4",   # comprehensions
+    "ICN",  # import conventions
+    "PD",   # pandas-vet
+    "PIE",  # misc. lints
+    "TID",  # type checking imports (replacement for TCH)
+    "T20",  # type checking
+    "FURB", # refurb
+    "PERF", # performance
+    "FAST", # fastapi
+] # Enable select rules
 
 # Ignore specific rules
 extend-ignore = [
-    "B008", # Do not perform function calls in argument defaults
+    "B008",    # Do not perform function calls in argument defaults
+    "T201",    # print
+    "RUF029",
+    "E501",
+    "PLW0603",
 ]
+
 
 [tool.ruff.format]
 quote-style = "single"
+preview = true
 
 [tool.ruff.isort]
 lines-after-imports = 2
+combine-as-imports = true
+known-first-party = ["research_mcp"]
 
 [dependency-groups]
-dev = ["pytest>=8.3.3", "pytest-asyncio>=0.24.0"]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "righttyper",
+    "scalene>=1.5.48",
+    "memray>=1.11.0",         # Memory profiling
+    "pyinstrument>=4.6.2",    # CPU profiling
+    "vulture>=2.11",          # Find dead code
+]

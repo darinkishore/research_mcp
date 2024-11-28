@@ -1,20 +1,21 @@
 from typing import Literal
 
+from cleantext import clean
 from pydantic import BaseModel, Field
 
 
 # Define valid categories from README
 ExaCategory = Literal[
-    "company",
-    "research paper",
-    "news",
-    "linkedin profile",
-    "github",
-    "tweet",
-    "movie",
-    "song",
-    "personal site",
-    "pdf",
+    'company',
+    'research paper',
+    'news',
+    'linkedin profile',
+    'github',
+    'tweet',
+    'movie',
+    'song',
+    'personal site',
+    'pdf',
 ]
 
 
@@ -34,35 +35,33 @@ class SearchResultItem(BaseModel):
     published_date: str | None = None
     author: str | None = None
     text: str
-    highlights: list[str] | None = None
-    highlight_scores: list[float] | None = None
+
+    def model_post_init(self, __context) -> None:
+        self.text = clean(self.text, lower=False)
 
 
-class CleanedContent(BaseModel):
-    title: str
-    author: str
-    url: str
-    summary: str
+class SummarizedContent(BaseModel):
+    id: str
     relevance_summary: str
-    content: str
+    dense_summary: str
 
 
 class QueryPurpose(BaseModel):
     """Purpose and context for a set of queries"""
 
-    purpose: str = Field(..., description="The research purpose for this query set")
-    question: str = Field(..., description="Main query theme")
-    queries: list[ExaQuery] = Field(..., description="output queries")
+    purpose: str = Field(..., description='The research purpose for this query set')
+    question: str = Field(..., description='Main query theme')
+    queries: list[ExaQuery] = Field(..., description='output queries')
 
 
 class QueryRequest(BaseModel):
-    purpose: str = Field(
-        ...,
-        description="why do you want to know this thing? (ie: relevant context from your task. more details better.)",
+    purpose: str | None = Field(
+        None,
+        description='why do you want to know this thing? (ie: relevant context from your task. more details better.)',
     )
     question: str = Field(
         ...,
-        description="what do you want to know, more specifically? use natural language, be descriptive.",
+        description='what do you want to know, more specifically? use natural language, be descriptive.',
     )
 
 
@@ -72,7 +71,7 @@ class QueryResults(BaseModel):
     query_id: int
     query: ExaQuery
     raw_results: list[SearchResultItem]
-    processed_results: list[CleanedContent]
+    summarized_results: list[SummarizedContent]
 
     class Config:
         arbitrary_types_allowed = True  # Needed for ExaQuery which is still a dataclass
@@ -81,17 +80,17 @@ class QueryResults(BaseModel):
 class ResearchResults(BaseModel):
     """Container for all results from a research request"""
 
-    purpose: str = Field(..., description="Original research purpose")
-    question: str = Field(..., description="Original research question")
+    purpose: str = Field(..., description='Original research purpose')
+    question: str = Field(..., description='Original research question')
     query_results: list[QueryResults]
 
     def all_raw_results(self) -> list[SearchResultItem]:
         """Flatten all raw results into a single list"""
         return [result for qr in self.query_results for result in qr.raw_results]
 
-    def all_processed_results(self) -> list[CleanedContent]:
+    def all_processed_results(self) -> list[SummarizedContent]:
         """Flatten all processed results into a single list"""
-        return [result for qr in self.query_results for result in qr.processed_results]
+        return [result for qr in self.query_results for result in qr.summarized_results]
 
     class Config:
         arbitrary_types_allowed = True  # Needed for nested dataclass types

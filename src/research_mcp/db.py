@@ -2,17 +2,15 @@ import datetime
 import os
 from contextlib import asynccontextmanager
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
-
 
 # Create async database engine - note the async sqlite driver
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///results.db')
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,  # Set to False in production
     future=True,
 )
 
@@ -28,6 +26,8 @@ AsyncSessionLocal = sessionmaker(
 # Create base class for declarative models
 Base = declarative_base()
 
+# TODO: remove highlights
+
 
 class Result(Base):
     """Database model for research results."""
@@ -35,17 +35,16 @@ class Result(Base):
     __tablename__ = 'results'
 
     id = Column(String, primary_key=True)
-    title = Column(Text, nullable=False)
-    author = Column(Text, nullable=False)
-    url = Column(Text, nullable=False)
+    title = Column(Text, nullable=True)
+    author = Column(Text, nullable=True)
+    url = Column(Text, nullable=True)
 
     # Summaries
-    summary = Column(Text, nullable=False)
+    dense_summary = Column(Text, nullable=False)
     relevance_summary = Column(Text, nullable=False)
 
     # Content
-    full_text = Column(Text, nullable=False)
-    cleaned_content = Column(Text, nullable=False)
+    text = Column(Text, nullable=False)
 
     # Relevance
     relevance_score = Column(Float, nullable=False)
@@ -53,6 +52,8 @@ class Result(Base):
     # Query Context
     query_purpose = Column(Text, nullable=False)
     query_question = Column(Text, nullable=False)
+
+    published_date = Column(Text, nullable=True)
 
     # Metadata
 
@@ -63,14 +64,9 @@ class Result(Base):
         default=datetime.datetime.utcnow,
         onupdate=datetime.datetime.utcnow,
     )
-    exa_id = Column(String, nullable=True)
-    raw_highlights = Column(JSON, nullable=True)
 
     # Relationships
     query_results = relationship('QueryResult', back_populates='result', lazy='selectin')
-
-
-Result.metadata = Column(JSON, nullable=True)
 
 
 class ExaQuery(Base):

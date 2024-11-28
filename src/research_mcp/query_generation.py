@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import dspy
 from braintrust import traced
+from dspy import InputField, OutputField, Signature
 
+from research_mcp.dspy_init import get_dspy_lm
 from research_mcp.models import ExaQuery, QueryPurpose
-
 
 # Training data
 TRAINING_DATA = [
@@ -120,17 +123,21 @@ def format_training_examples():
     examples = []
     examples.append('<examples>')
     for purpose in TRAINING_DATA:
-        examples.append('<input>')
-        examples.append(f'**Purpose:** {purpose.purpose}')
-        examples.append(f'**Question:** {purpose.question}')
-        examples.append('</input>')
-        examples.append('<output>')
+        examples.extend((
+            '<input>',
+            f'**Purpose:** {purpose.purpose}',
+            f'**Question:** {purpose.question}',
+            '</input>',
+            '<output>',
+        ))
         for query in purpose.queries:
-            examples.append('<query>')
-            examples.append(f'   Query: "{query.text}"')
-            examples.append(f'   Category: {query.category or "null"}')
-            examples.append(f'   LiveCrawl: {query.livecrawl}')
-            examples.append('</query>')
+            examples.extend((
+                '<query>',
+                f'   Query: "{query.text}"',
+                f'   Category: {query.category or "null"}',
+                f'   LiveCrawl: {query.livecrawl}',
+                '</query>',
+            ))
         examples.append('</output>')
     examples.append('</examples>\n')
     return '\n'.join(examples)
@@ -171,35 +178,37 @@ Remember to:
 - End each query with a colon
 """
 
+# Remove LM initialization, just keep the generator singleton
+_query_generator = None
 
-class PurposeDrivenQuery(dspy.Signature):
+
+def get_query_generator():
+    global _query_generator
+    if _query_generator is None:
+        get_dspy_lm()  # Ensure DSPy is initialized
+        _query_generator = dspy.ChainOfThought(PurposeDrivenQuery)
+        _query_generator = dspy.asyncify(_query_generator)
+    return _query_generator
+
+
+class PurposeDrivenQuery(Signature):
     """Generate a list of optimized Exa queries based on a purpose and question."""
 
-    purpose: str = dspy.InputField(
+    purpose: str = InputField(
         description='why do you want to know this thing? (ie: relevant context from your task. more details better.)'
     )
-    question: str = dspy.InputField(
+    question: str = InputField(
         description='what do you want to know, more specifically? use natural language, be descriptive.'
     )
 
-    queries: list[ExaQuery] = dspy.OutputField(description=QUERY_DESCRIPTION)
+    queries: list[ExaQuery] = OutputField(description=QUERY_DESCRIPTION)
 
 
-# Initialize DSPy with GPT-4
-def initialize_query_generator(async_max_workers: int = 4):
-    lm = dspy.LM('openai/gpt-4o-2024-11-20')
-    dspy.settings.configure(lm=lm, async_max_workers=async_max_workers)
-    query_generator = dspy.ChainOfThought(PurposeDrivenQuery)
-    query_generator = dspy.asyncify(query_generator)
-    return query_generator
-
-
-query_generator = initialize_query_generator()
-
-
+# Update the generate_queries function
 @traced(type='llm')
 async def generate_queries(purpose: str, question: str) -> list[ExaQuery]:
-    result = await query_generator(
+    generator = get_query_generator()
+    result = await generator(
         purpose=purpose,
         question=question,
     )

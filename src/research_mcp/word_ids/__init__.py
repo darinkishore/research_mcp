@@ -6,7 +6,6 @@ from sqlalchemy import select
 
 from research_mcp.db import Result, db
 
-
 # Paths to the adjective and noun files
 ADJECTIVES_FILE = Path(__file__).parent / 'adjectives.txt'
 NOUNS_FILE = Path(__file__).parent / 'nouns.txt'
@@ -17,8 +16,8 @@ class WordIDGenerator:
         self.adjectives = self._load_words(ADJECTIVES_FILE)
         self.nouns = self._load_words(NOUNS_FILE)
 
-    def _load_words(self, filepath):
-        with open(filepath) as f:
+    def _load_words(self, filepath):  # noqa: PLR6301
+        with filepath.open(encoding='utf-8') as f:
             words = [line.strip().lower() for line in f if line.strip()]
         return words
 

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 
@@ -56,41 +57,65 @@ def format_resource_content(
     title: str,
     author: str | None,
     content: str,
+    published_date: datetime | None = None,
 ) -> str:
     """Format the content for a resource."""
-    return f"""# [{result_id}]
-## Title: {title}
+    date_element = (
+        f'\n<published_date>{published_date.strftime("%Y-%m-%d")}</published_date>'
+        if published_date
+        else ''
+    )
+    return f"""<resource id="{result_id}">
+<title>{title}</title>
 
-**Author:** {author}
-
-## Full Content
+<author>{author}</author>{date_element}
 
 <content>
 {content}
 </content>
-"""
+</resource>"""
+
+
+def wrap_in_results_tag(content: str) -> str:
+    """Wrap the content in the results format."""
+    return f"""<results>
+{content}
+</results>"""
 
 
 def format_query_results_summary(query_text: str, category: str | None, livecrawl: bool) -> str:
     """Format the header for query results."""
     return f"""
-# Results for Query: {query_text}
-{'Category: ' + category if category else ''}
-{'Crawled recently' if livecrawl else ''}
+<query>
+<text>{query_text}</text>
+{f'<category>{category}</category>' if category else ''}
+{'<crawl-status>recent</crawl-status>' if livecrawl else ''}
+</query>
 """.strip()
 
 
 def format_result_summary(
-    result_id: str, title: str, author: str, relevance_summary: str, summary: str
+    result_id: str,
+    title: str,
+    author: str,
+    relevance_summary: str,
+    summary: str,
+    published_date: datetime | None = None,
 ) -> str:
     """Format an individual result summary."""
+    date_element = f'\n<date>{published_date.strftime("%Y-%m-%d")}</date>' if published_date else ''
     return f"""\
-## [{result_id}] {title}
-**Author:** {author}
+<result id="{result_id}">
 
-### Relevance to Your Query
+<title>{title}</title>
+{date_element}
+<author>{author}</author>
+
+<relevance>
 {relevance_summary}
+</relevance>
 
-### Summary
+<summary>
 {summary}
-"""
+</summary>
+</result>"""

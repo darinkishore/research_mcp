@@ -1,22 +1,21 @@
 import dspy
 
-from research_mcp.models import CleanedContent, QueryRequest, SearchResultItem
+from research_mcp.dspy_init import get_dspy_lm
+from research_mcp.models import QueryRequest, SearchResultItem, SummarizedContent
 
 
 class CleanContent(dspy.Signature):
     """
-    Clean and format content based on the original query and search results.
-    Analyze the provided search results based on the original query and extract only the most relevant articles or papers.
-    For each relevant result, return:
-    1. Title
-    2. Author(s)
-    3. URL
-    4. A hyper-brief overall summary of the content. 15 words or less.
-    5. A brief summary of why it's relevant to the original query.
-    6. Full text (cleaned of metadata and formatting). If the text is more than 5 paragraphs, provide a super-dense version
-       that conveys as much of the original content as possible in a condensed form.
+    Extract information from search results to get the best results.
+    Only keep search results that are relevant to the original query.
 
-    Format the response in markdown. Be thorough, and consider the context of the query.
+    For each result, return:
+    1. The ID of the result
+    2. A relevance summary: why it's relevant to the original query
+    3. A hyper-dense summary of the content.
+        - Use the original content, but tailor it for our query.
+        - Be as dense as possible. Don't miss anything not contained in the query.
+        - If the content is <1000 words or < 5 paragraphs, return it in full.
     """
 
     original_query: QueryRequest = dspy.InputField(
@@ -24,26 +23,28 @@ class CleanContent(dspy.Signature):
     )
     content: list[SearchResultItem] = dspy.InputField(desc='the raw search results')
 
-    cleaned_response: list[CleanedContent] = dspy.OutputField(
-        desc='A markdown-formatted response summarizing the most relevant articles or papers. '
-        'For each result, include title, author(s), URL, relevance summary, and a super-dense version of the main text.'
+    cleaned_response: list[SummarizedContent] = dspy.OutputField(
+        desc='list of (id, dense_summary, relevance_summary) for only results that are relevant to the original query'
     )
 
 
-def initalize_content_cleaner(async_max_workers: int = 4):
-    lm = dspy.LM('openai/gpt-4o-2024-11-20')
-    dspy.settings.configure(lm=lm, async_max_workers=async_max_workers)
-    content_cleaner = dspy.ChainOfThought(CleanContent)
-    content_cleaner = dspy.asyncify(content_cleaner)
-    return content_cleaner
+# Instead of initializing for each call, make this a module-level singleton
+_lm = None
+_content_cleaner = None
 
 
-content_cleaner = initalize_content_cleaner()
+def get_content_cleaner():
+    global _lm, _content_cleaner
+    if _content_cleaner is None:
+        get_dspy_lm()  # Ensure DSPy is initialized
+        _content_cleaner = dspy.ChainOfThought(CleanContent)
+        _content_cleaner = dspy.asyncify(_content_cleaner)
+    return _content_cleaner
 
 
 async def clean_content(
     original_query: QueryRequest, content: list[SearchResultItem]
-) -> list[CleanedContent]:
-    result = await content_cleaner(original_query=original_query, content=content)
-
+) -> list[SummarizedContent]:
+    cleaner = get_content_cleaner()
+    result = await cleaner(original_query=original_query, content=content)
     return result.cleaned_response
