@@ -90,16 +90,29 @@ def format_query_results_summary(query_text: str, category: str | None, livecraw
 """.strip()
 
 
+def format_date(date_str: str | None) -> str | None:
+    """Format date string to yyyy-mm-dd format."""
+    if not date_str:
+        return None
+    try:
+        # Parse ISO format date
+        date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return date.strftime('%Y-%m-%d')
+    except (ValueError, AttributeError):
+        return None
+
+
 def format_result_summary(
     result_id: str,
     title: str,
     author: str,
     relevance_summary: str,
     summary: str,
-    published_date: datetime | None = None,
+    published_date: str | None = None,
 ) -> str:
     """Format an individual result summary."""
-    date_element = f'\n<date>{published_date.strftime("%Y-%m-%d")}</date>' if published_date else ''
+    formatted_date = format_date(published_date)
+    date_element = f'\n<date>{formatted_date}</date>' if formatted_date else ''
     return f"""\
 <result id="{result_id}">
 
@@ -121,11 +134,21 @@ def format_full_texts_response(results: list[dict]) -> str:
     """Format multiple full text results with clear separation."""
     formatted = []
     for result in results:
+        # Truncate author if longer than 120 chars
+        author = result['author']
+        if author:
+            if len(author) > 120:
+                author = author[:120] + '...'
+            author_element = f'<author>{author}</author>\n'
+        else:
+            author_element = ''
+
+        formatted_date = format_date(result['published_date'])
+        date_element = f'<date>{formatted_date}</date>\n' if formatted_date else ''
+
         text = f"""<text id="{result['id']}">
 <title>{result['title']}</title>
-<author>{result['author'] or 'Unknown'}</author>
-<date>{result['published_date'] or 'Unknown'}</date>
-
+{author_element}{date_element}
 <content>
 {result['content']}
 </content>

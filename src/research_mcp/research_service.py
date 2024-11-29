@@ -58,15 +58,14 @@ class ResearchService:
             )
         return results.results
 
-    async def process_search_query(self, search_query: QueryRequest) -> QueryResults:
+    async def process_search_query(self, search_query: ExaQueryModel) -> QueryResults:
         """Process a single search query and return the raw results."""
         # Store query in database
         async with db() as session:
-            exa_query = ExaQueryModel(text=search_query.question)
             db_query = ExaQuery(
-                query_text=exa_query.text,
-                category=None,  # We'll add category support later
-                livecrawl=False,  # We'll add livecrawl support later
+                query_text=search_query.text,
+                category=search_query.category,
+                livecrawl=search_query.livecrawl,
             )
             session.add(db_query)
             await session.commit()
@@ -74,9 +73,9 @@ class ResearchService:
 
         # Execute search
         exa_results = await self.perform_search(
-            query_text=search_query.question,
-            category=None,  # We'll add category support later
-            livecrawl=False,  # We'll add livecrawl support later
+            query_text=search_query.text,
+            category=search_query.category,
+            livecrawl=search_query.livecrawl,
         )
 
         # Convert to our models
@@ -95,7 +94,7 @@ class ResearchService:
 
         return QueryResults(
             query_id=query_id,
-            query=exa_query,
+            query=search_query,
             raw_results=raw_results,
             summarized_results=[],  # Will be filled later
         )
@@ -112,13 +111,24 @@ class ResearchService:
             existing_results = (await session.execute(existing_results_stmt)).scalars().all()
             existing_result_ids = {r.id for r in existing_results}
 
-            # Prepare new results and links
-            new_results = []
-            new_links = []
+            # Create a mapping of result_id to summarized_content for easier lookup
+            summarized_by_id = {}
             for query_result in research_results.query_results:
                 for raw_result, summarized_result in zip(
                     query_result.raw_results, query_result.summarized_results, strict=False
                 ):
+                    if summarized_result and summarized_result.id == raw_result.id:
+                        summarized_by_id[raw_result.id] = summarized_result
+
+            # Prepare new results and links
+            new_results = []
+            new_links = []
+            for query_result in research_results.query_results:
+                for raw_result in query_result.raw_results:
+                    summarized_result = summarized_by_id.get(raw_result.id)
+                    if not summarized_result:
+                        continue
+
                     if raw_result.id not in existing_result_ids:
                         new_result = Result(
                             id=raw_result.id,
@@ -127,7 +137,7 @@ class ResearchService:
                             url=raw_result.url or None,
                             dense_summary=summarized_result.dense_summary,
                             relevance_summary=summarized_result.relevance_summary,
-                            text=raw_result.text,
+                            text=raw_result.text,  # Use text from raw_result
                             relevance_score=raw_result.score,
                             query_purpose=purpose,
                             query_question=question,
@@ -198,8 +208,10 @@ class ResearchService:
         # Process content cleaning concurrently
         cleaning_tasks = []
         for query_result in research_results.query_results:
+            # Create a QueryRequest for summarization context
+            query_request = QueryRequest(purpose=purpose, question=question)
             cleaning_task = summarize_search_items(
-                original_query=QueryRequest(purpose=purpose, question=question),
+                original_query=query_request,
                 content=query_result.raw_results,
             )
             cleaning_tasks.append(cleaning_task)
