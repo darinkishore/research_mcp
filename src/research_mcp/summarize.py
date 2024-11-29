@@ -2,7 +2,7 @@ import asyncio
 from typing import Union
 
 import dspy
-from braintrust import traced
+from research_mcp.tracing import traced
 
 from research_mcp.dspy_init import get_dspy_lm
 from research_mcp.models import QueryRequest, SearchResultItem, SummarizedContent
@@ -48,7 +48,7 @@ def get_content_cleaner():
     return _content_cleaner
 
 
-@traced(type='tool')
+@traced(type='llm')
 async def summarize_search_items(
     original_query: QueryRequest, content: list[SearchResultItem]
 ) -> list[SummarizedContent]:

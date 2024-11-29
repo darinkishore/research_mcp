@@ -215,6 +215,7 @@ def clean_author(author: str | None) -> str | None:
 
 async def main():
     # Run the server using stdin/stdout streams
+    
     async with mcp.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,

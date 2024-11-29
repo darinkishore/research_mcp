@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from research_mcp.tracing import traced
 from exa_py import Exa
 from sqlalchemy import select
 
@@ -22,6 +23,9 @@ from research_mcp.summarize import summarize_search_items
 from research_mcp.word_ids import WordIDGenerator
 
 
+# braintrust span types: tool, task, scorer, eval, llm, function
+
+
 class ResearchService:
     """Service for handling research operations."""
 
@@ -30,6 +34,7 @@ class ResearchService:
         self.word_id_generator = word_id_generator
         self.exa_limiter = RateLimiter(rate=3)  # Slightly under 5/s to be safe
 
+    @traced(type='function')
     async def perform_search(
         self, query_text: str, category: str | None = None, livecrawl: bool = False
     ) -> list[SearchResultItem]:
@@ -58,6 +63,7 @@ class ResearchService:
             )
         return results.results
 
+    @traced(type='tool')
     async def process_search_query(self, search_query: ExaQueryModel) -> QueryResults:
         """Process a single search query and return the raw results."""
         # Store query in database
@@ -191,6 +197,7 @@ class ResearchService:
             results = (await session.execute(stmt)).scalars().all()
             return results
 
+    @traced(type='task')
     async def research(self, purpose: str, question: str) -> ResearchResults:
         """Perform comprehensive research on a topic."""
         # Generate optimized queries

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dspy
-from braintrust import traced
+from research_mcp.tracing import traced
 from dspy import InputField, OutputField, Signature
 
 from research_mcp.dspy_init import get_dspy_lm
