@@ -25,6 +25,10 @@ dependencies = [
     "uvloop>=0.21.0",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 
 [[project.authors]]
 name = "Darin"
@@ -80,6 +84,8 @@ extend-ignore = [
     "RUF029",
     "E501",
     "PLW0603",
+    "PLR2004",
+    "PLC0415",
 ]
 
 
