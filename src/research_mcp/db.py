@@ -4,8 +4,8 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+
 
 # Create async database engine - note the async sqlite driver
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///results.db')

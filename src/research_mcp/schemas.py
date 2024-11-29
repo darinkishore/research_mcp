@@ -115,3 +115,21 @@ def format_result_summary(
 {summary}
 </summary>
 </result>"""
+
+
+def format_full_texts_response(results: list[dict]) -> str:
+    """Format multiple full text results with clear separation."""
+    formatted = []
+    for result in results:
+        text = f"""<text id="{result['id']}">
+<title>{result['title']}</title>
+<author>{result['author'] or 'Unknown'}</author>
+<date>{result['published_date'] or 'Unknown'}</date>
+
+<content>
+{result['content']}
+</content>
+</text>"""
+        formatted.append(text.strip())
+
+    return '\n\n'.join(formatted)

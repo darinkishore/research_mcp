@@ -193,97 +193,155 @@ async def handle_list_tools() -> list[types.Tool]:
                     'queries and summarizing the results'
                 ),
                 inputSchema=get_search_tool_schema(),
-            )
+            ),
+            types.Tool(
+                name='get_full_texts',
+                description='Retrieve full text content for a list of result IDs',
+                inputSchema={
+                    'type': 'object',
+                    'properties': {
+                        'result_ids': {
+                            'type': 'array',
+                            'items': {'type': 'string'},
+                            'description': 'List of result IDs to retrieve full texts for',
+                        }
+                    },
+                    'required': ['result_ids'],
+                },
+            ),
         ]
         return tools
     except Exception:
         raise
 
 
-# TODO: Add tool for answering questions based on a document
+# KEEPME
+
+# _TODO: Add tool for answering questions based on a document
+# ^ lower priority, since we have better summarization and
+# for
 # TODO: Get full texts tool that given ids, returns full text of all results in them
+# ^ highest priority,
+# because claude desktop doesn't have a resources implementation.
+
+# KEEPME
 
 
 @server.call_tool()
-@traced(name='Research Request', type='task')
 async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Handle research tool execution."""
     try:
-        if name != 'search':
-            raise ValueError(f'Unknown tool: {name}')
-        if not arguments:
-            raise ValueError('Missing arguments')
+        if name == 'search':
+            if not arguments:
+                raise ValueError('Missing arguments')
 
-        purpose = arguments.get('purpose')
-        question = arguments.get('question')
-        if not purpose or not question:
-            raise ValueError('Missing purpose or question')
+            purpose = arguments.get('purpose')
+            question = arguments.get('question')
+            if not purpose or not question:
+                raise ValueError('Missing purpose or question')
 
-        # Generate optimized queries based on purpose and question
-        search_queries = await generate_queries(purpose=purpose, question=question)
-        assert search_queries, 'No search queries were generated'
+            # Generate optimized queries based on purpose and question
+            search_queries = await generate_queries(purpose=purpose, question=question)
+            assert search_queries, 'No search queries were generated'
 
-        # Initialize our research results container
-        research_results = ResearchResults(purpose=purpose, question=question, query_results=[])
+            # Initialize our research results container
+            research_results = ResearchResults(purpose=purpose, question=question, query_results=[])
 
-        # Process each query concurrently to get raw results
-        query_tasks = [process_search_query(search_query) for search_query in search_queries]
-        raw_query_results = await asyncio.gather(*query_tasks)
+            # Process each query concurrently to get raw results
+            query_tasks = [process_search_query(search_query) for search_query in search_queries]
+            raw_query_results = await asyncio.gather(*query_tasks)
 
-        # Now process all content cleaning concurrently
-        cleaning_tasks = []
-        for query_result in raw_query_results:
-            cleaning_task = summarize_search_items(
-                original_query=QueryRequest(purpose=purpose, question=question),
-                content=query_result.raw_results,
-            )
-            cleaning_tasks.append(cleaning_task)
-
-        # Wait for all content cleaning to complete
-        cleaned_results = await asyncio.gather(*cleaning_tasks)
-
-        # Combine raw results with cleaned results
-        for query_result, cleaned_result in zip(raw_query_results, cleaned_results, strict=True):
-            query_result.summarized_results = cleaned_result
-            research_results.query_results.append(query_result)
-
-        # Store all results in database
-        await store_results_in_db(research_results, purpose, question)
-
-        # Generate summaries for output, grouped by query
-        summaries = []
-        for query_result in research_results.query_results:
-            # Add query header using schema formatter
-            summaries.append(
-                format_query_results_summary(
-                    query_text=query_result.query.text,
-                    category=query_result.query.category,
-                    livecrawl=query_result.query.livecrawl,
+            # Now process all content cleaning concurrently
+            cleaning_tasks = []
+            for query_result in raw_query_results:
+                cleaning_task = summarize_search_items(
+                    original_query=QueryRequest(purpose=purpose, question=question),
+                    content=query_result.raw_results,
                 )
-            )
+                cleaning_tasks.append(cleaning_task)
 
-            # Add results for this query using schema formatter
-            for raw_result, summarized_result in zip(
-                query_result.raw_results, query_result.summarized_results, strict=False
+            # Wait for all content cleaning to complete
+            cleaned_results = await asyncio.gather(*cleaning_tasks)
+
+            # Combine raw results with cleaned results
+            for query_result, cleaned_result in zip(
+                raw_query_results, cleaned_results, strict=True
             ):
+                query_result.summarized_results = cleaned_result
+                research_results.query_results.append(query_result)
+
+            # Store all results in database
+            await store_results_in_db(research_results, purpose, question)
+
+            # Generate summaries for output, grouped by query
+            summaries = []
+            for query_result in research_results.query_results:
+                # Add query header using schema formatter
                 summaries.append(
-                    format_result_summary(
-                        result_id=raw_result.id,
-                        title=raw_result.title,
-                        author=raw_result.author[:60] + '...',
-                        relevance_summary=summarized_result.relevance_summary,
-                        summary=summarized_result.text,
-                        published_date=raw_result.published_date,
+                    format_query_results_summary(
+                        query_text=query_result.query.text,
+                        category=query_result.query.category,
+                        livecrawl=query_result.query.livecrawl,
                     )
                 )
 
-        # Notify clients that new resources are available
-        await server.request_context.session.send_resource_list_changed()
+                # Add results for this query using schema formatter
+                for raw_result, summarized_result in zip(
+                    query_result.raw_results, query_result.summarized_results, strict=False
+                ):
+                    summaries.append(
+                        format_result_summary(
+                            result_id=raw_result.id,
+                            title=raw_result.title,
+                            author=raw_result.author[:60] + '...',
+                            relevance_summary=summarized_result.relevance_summary,
+                            summary=summarized_result.text,
+                            published_date=raw_result.published_date,
+                        )
+                    )
 
-        result = [types.TextContent(type='text', text=wrap_in_results_tag('\n\n'.join(summaries)))]
-        return result
+            # Notify clients that new resources are available
+            await server.request_context.session.send_resource_list_changed()
+
+            result = [
+                types.TextContent(type='text', text=wrap_in_results_tag('\n\n'.join(summaries)))
+            ]
+            return result
+
+        elif name == 'get_full_texts':
+            if not arguments or 'result_ids' not in arguments:
+                raise ValueError('Missing result_ids argument')
+
+            result_ids = arguments['result_ids']
+            if not isinstance(result_ids, list):
+                raise ValueError('result_ids must be a list')
+
+            # Fetch results from database
+            async with db() as session:
+                stmt = select(DBResult).where(DBResult.id.in_(result_ids))
+                results = (await session.execute(stmt)).scalars().all()
+
+                # Format results
+                formatted_texts = []
+                for result in results:
+                    formatted_text = format_resource_content(
+                        result_id=result.id,
+                        title=result.title,
+                        author=clean_author(result.author),
+                        content=result.text,
+                        published_date=result.published_date,
+                    )
+                    formatted_texts.append(formatted_text)
+
+                # Join all texts with clear separators
+                combined_text = '\n\n---\n\n'.join(formatted_texts)
+
+                return [types.TextContent(type='text', text=combined_text)]
+
+        else:
+            raise ValueError(f'Unknown tool: {name}')
 
     except Exception as e:
         raise e
