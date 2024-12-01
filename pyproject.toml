@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.9.4",
     "sqlalchemy[asyncio]>=2.0.36",
     "stackprinter>=0.2.12",
+    "tenacity>=9.0.0",
     "uvicorn>=0.32.1",
     "uvloop>=0.21.0",
 ]

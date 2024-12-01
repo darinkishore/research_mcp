@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import sys
 
 import dotenv
 import mcp
 import stackprinter
-from braintrust import init_logger
+from braintrust import current_span, init_logger, traced
 from exa_py import Exa
 from mcp import types
 from mcp.server import NotificationOptions, Server
@@ -40,7 +42,11 @@ exa = Exa(EXA_API_KEY)
 # Initialize the server and service
 server = Server('research_mcp')
 word_id_generator = WordIDGenerator()
-research_service = ResearchService(exa, word_id_generator)
+research_service = ResearchService(exa, word_id_generator, server=server)
+
+# Configure logging
+logger = logging.getLogger('research-mcp')
+logger.setLevel(logging.INFO)
 
 
 @server.list_resources()
@@ -120,17 +126,19 @@ async def handle_list_tools() -> list[types.Tool]:
 
 
 @server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: dict | None
-) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+@traced(type='task')
+async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
     """Handle research tool execution."""
     try:
         if name == 'search':
+            current_span().set_attributes(name=f'tool.{name}')
+
             if not arguments:
                 raise ValueError('Missing arguments')
 
             purpose = arguments.get('purpose')
             question = arguments.get('question')
+
             if not purpose or not question:
                 raise ValueError('Missing purpose or question')
 
@@ -173,6 +181,8 @@ async def handle_call_tool(
             return result
 
         elif name == 'get_full_texts':
+            current_span().set_attributes(name=f'tool.{name}')
+
             if not arguments or 'result_ids' not in arguments:
                 raise ValueError('Missing result_ids argument')
 
@@ -213,22 +223,41 @@ def clean_author(author: str | None) -> str | None:
     return author
 
 
+@server.set_logging_level()
+async def set_logging_level(level: types.LoggingLevel) -> types.EmptyResult:
+    """Handle requests to change the logging level."""
+    logger.setLevel(level.upper())
+    await server.request_context.session.send_log_message(
+        level='info', data=f'Log level set to {level}', logger='research-mcp'
+    )
+    return types.EmptyResult()
+
+
 async def main():
     # Run the server using stdin/stdout streams
-    
     async with mcp.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
+        try:
+            init_options = InitializationOptions(
                 server_name='research_mcp',
                 server_version='0.1.0',
                 capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
+                    notification_options=NotificationOptions(
+                        prompts_changed=False,
+                        resources_changed=False,
+                        tools_changed=False,
+                    ),
                     experimental_capabilities={},
                 ),
-            ),
-        )
+            )
+
+            await server.run(
+                read_stream,
+                write_stream,
+                init_options,
+            )
+        except Exception as e:
+            print(f'Server error: {e}', file=sys.stderr)
+            raise
 
 
 if __name__ == '__main__':

@@ -3,36 +3,104 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import hashlib
+import json
+import logging
+import sys
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
-from research_mcp.tracing import traced
+
+if TYPE_CHECKING:
+    from mcp.server import Server
+
 from exa_py import Exa
-from sqlalchemy import select
+from exa_py.api import ResultWithText, SearchResponse
+from sqlalchemy import delete, select
 
-from research_mcp.db import ExaQuery, QueryResult, Result, db
+from research_mcp.db import Cache, ExaQuery, QueryResult, Result, db
 from research_mcp.models import (
     ExaQuery as ExaQueryModel,
     QueryRequest,
     QueryResults,
     ResearchResults,
     SearchResultItem,
+    SummarizedContent,
 )
 from research_mcp.query_generation import generate_queries
 from research_mcp.rate_limiter import RateLimiter
 from research_mcp.summarize import summarize_search_items
+from research_mcp.tracing import traced
 from research_mcp.word_ids import WordIDGenerator
 
 
 # braintrust span types: tool, task, scorer, eval, llm, function
 
+logger = logging.getLogger('research-mcp')
+
 
 class ResearchService:
     """Service for handling research operations."""
 
-    def __init__(self, exa_client: Exa, word_id_generator: WordIDGenerator):
+    def __init__(
+        self,
+        exa_client: Exa,
+        word_id_generator: WordIDGenerator,
+        server: Server | None = None,
+        cache_enabled=True,
+        cache_ttl: timedelta | None = timedelta(days=7),
+    ):
         self.exa = exa_client
         self.word_id_generator = word_id_generator
-        self.exa_limiter = RateLimiter(rate=3)  # Slightly under 5/s to be safe
+        self.exa_limiter = RateLimiter(rate=4)  # Slightly under 5/s to be safe
+        self.server = server
+        self.cache_enabled = cache_enabled
+        self.cache_ttl = cache_ttl
+
+    def _build_cache_key(self, query: str, purpose: str, question: str) -> str:
+        """Build a cache key from query parameters."""
+        data = json.dumps(
+            {'query': query, 'purpose': purpose, 'question': question}, sort_keys=True
+        )
+        return hashlib.sha256(data.encode()).hexdigest()
+
+    async def _get_cached_result(self, cache_key: str) -> dict | None:
+        """Get cached result if it exists and is not expired."""
+        if not self.cache_enabled:
+            return None
+
+        async with db() as session:
+            result = await session.execute(select(Cache).where(Cache.key == cache_key))
+            cache_entry = result.scalar_one_or_none()
+
+            if cache_entry is None:
+                return None
+
+            if cache_entry.is_expired:
+                await session.delete(cache_entry)
+                await session.commit()
+                return None
+
+            return json.loads(cache_entry.data)
+
+    async def _cache_result(self, cache_key: str, result: dict) -> None:
+        """Cache a result in the database."""
+        if not self.cache_enabled:
+            return
+
+        async with db() as session:
+            # Calculate expiration time if TTL is set
+            expires_at = None
+            if self.cache_ttl:
+                expires_at = datetime.utcnow() + self.cache_ttl
+
+            # Create new cache entry
+            cache_entry = Cache(key=cache_key, data=json.dumps(result), expires_at=expires_at)
+
+            # Merge in case key already exists
+            await session.merge(cache_entry)
+            await session.commit()
+            logger.debug(f'Cached result for key: {cache_key}')
 
     @traced(type='function')
     async def perform_search(
@@ -40,7 +108,7 @@ class ResearchService:
     ) -> list[SearchResultItem]:
         """Perform search and return results."""
         assert query_text.strip(), 'Query text cannot be empty'
-        search_args = {
+        search_args: dict[str, Any] = {
             'num_results': 10,
             'type': 'neural',
             'text': True,
@@ -54,14 +122,25 @@ class ResearchService:
         # Wait for rate limit
         await self.exa_limiter.acquire()
 
-        # If Exa client supports async, use it directly; else, use to_thread
-        if hasattr(self.exa.search_and_contents, '__await__'):
-            results = await self.exa.search_and_contents(query_text, **search_args)
-        else:
-            results = await asyncio.to_thread(
-                self.exa.search_and_contents, query_text, **search_args
+        # Cast the result to the correct type
+        results = cast(
+            SearchResponse[ResultWithText],
+            await asyncio.to_thread(self.exa.search_and_contents, query_text, **search_args),
+        )
+
+        # Convert ResultWithText to SearchResultItem
+        return [
+            SearchResultItem(
+                url=r.url,
+                id=str(r.id),  # Ensure id is string
+                title=r.title or '',  # Handle potential None
+                score=float(r.score),  # Ensure float
+                published_date=r.published_date,
+                author=r.author,
+                text=r.text or '',  # Handle potential None
             )
-        return results.results
+            for r in results.results
+        ]
 
     @traced(type='tool')
     async def process_search_query(self, search_query: ExaQueryModel) -> QueryResults:
@@ -99,7 +178,7 @@ class ResearchService:
         ]
 
         return QueryResults(
-            query_id=query_id,
+            query_id=int(query_id),
             query=search_query,
             raw_results=raw_results,
             summarized_results=[],  # Will be filled later
@@ -108,7 +187,7 @@ class ResearchService:
     async def store_results(self, research_results: ResearchResults, purpose: str, question: str):
         """Store all results in the database."""
         async with db() as session:
-            result_ids = set()
+            result_ids: set[str] = set()
             for query_result in research_results.query_results:
                 result_ids.update(r.id for r in query_result.raw_results)
 
@@ -131,10 +210,12 @@ class ResearchService:
             new_links = []
             for query_result in research_results.query_results:
                 for raw_result in query_result.raw_results:
+                    # Type-safe way to get summarized_result
                     summarized_result = summarized_by_id.get(raw_result.id)
                     if not summarized_result:
                         continue
 
+                    # Now TypeScript knows summarized_result is not None
                     if raw_result.id not in existing_result_ids:
                         new_result = Result(
                             id=raw_result.id,
@@ -143,7 +224,7 @@ class ResearchService:
                             url=raw_result.url or None,
                             dense_summary=summarized_result.dense_summary,
                             relevance_summary=summarized_result.relevance_summary,
-                            text=raw_result.text,  # Use text from raw_result
+                            text=raw_result.text,
                             relevance_score=raw_result.score,
                             query_purpose=purpose,
                             query_question=question,
@@ -185,7 +266,8 @@ class ResearchService:
         """Get a specific result by ID."""
         async with db() as session:
             stmt = select(Result).where(Result.id == result_id)
-            result: Result = (await session.execute(stmt)).scalars().first()
+            result: Result | None = (await session.execute(stmt)).scalar_one_or_none()
+
             if not result:
                 raise ValueError(f'Result not found: {result_id}')
             return result
@@ -197,42 +279,101 @@ class ResearchService:
             results = (await session.execute(stmt)).scalars().all()
             return results
 
-    @traced(type='task')
+    @traced(type='tool')
     async def research(self, purpose: str, question: str) -> ResearchResults:
-        """Perform comprehensive research on a topic."""
-        # Generate optimized queries
-        search_queries = await generate_queries(purpose=purpose, question=question)
-        assert search_queries, 'No search queries were generated'
+        """Perform research based on purpose and question."""
+        try:
+            # Generate optimized queries
+            search_queries = await generate_queries(purpose=purpose, question=question)
+            assert search_queries, 'No search queries were generated'
 
-        # Initialize research results container
-        research_results = ResearchResults(purpose=purpose, question=question, query_results=[])
+            # Initialize research results container with empty query_results
+            research_results = ResearchResults(purpose=purpose, question=question, query_results=[])
 
-        # Process each query sequentially to avoid database concurrency issues
-        for query in search_queries:
-            query_result = await self.process_search_query(query)
-            research_results.query_results.append(query_result)
+            # Process each query sequentially to avoid database concurrency issues
+            # Process all search queries concurrently
+            query_tasks = [self.process_search_query(query) for query in search_queries]
+            query_results = await asyncio.gather(*query_tasks)
 
-        # Process content cleaning concurrently
-        cleaning_tasks = []
-        for query_result in research_results.query_results:
-            # Create a QueryRequest for summarization context
-            query_request = QueryRequest(purpose=purpose, question=question)
-            cleaning_task = summarize_search_items(
-                original_query=query_request,
-                content=query_result.raw_results,
-            )
-            cleaning_tasks.append(cleaning_task)
+            research_results.query_results = query_results
 
-        # Wait for all content cleaning
-        cleaned_results = await asyncio.gather(*cleaning_tasks)
+            # Process content cleaning concurrently
+            cleaning_tasks = []
+            for query_result in research_results.query_results:
+                query_request = QueryRequest(purpose=purpose, question=question)
+                cleaning_task = summarize_search_items(
+                    original_query=query_request,
+                    content=query_result.raw_results,
+                )
+                cleaning_tasks.append(cleaning_task)
 
-        # Update results with cleaned content
-        for query_result, cleaned_result in zip(
-            research_results.query_results, cleaned_results, strict=True
-        ):
-            query_result.summarized_results = cleaned_result
+            # Wait for all content cleaning
+            cleaned_results: list[list[SummarizedContent]] = await asyncio.gather(*cleaning_tasks)
 
-        # Store results
-        await self.store_results(research_results, purpose, question)
+            # Update results with cleaned content
+            for query_result, cleaned_result in zip(
+                research_results.query_results, cleaned_results, strict=True
+            ):
+                # Explicitly set the summarized_results with proper typing
+                query_result.summarized_results = cleaned_result
 
-        return research_results
+            # Store results
+            await self.store_results(research_results, purpose, question)
+
+            return research_results
+        except Exception as e:
+            print(f'Research error: {e}', file=sys.stderr)
+            raise
+
+    async def process_research_request(self, request: dict) -> dict:
+        """Process a research request with persistent caching."""
+        query = request.get('query', '')
+        purpose = request.get('purpose', '')
+        question = request.get('question', '')
+
+        cache_key = self._build_cache_key(query, purpose, question)
+
+        # Check cache first
+        cached_result = await self._get_cached_result(cache_key)
+        if cached_result:
+            logger.info(f'Cache hit for query: {query}')
+            return cached_result
+
+        logger.info(f'Cache miss for query: {query}')
+        try:
+            # Existing research logic
+            results = await self.research(purpose, question)
+
+            processed_results = []
+            for query_result in results.query_results:
+                for raw_result in query_result.raw_results:
+                    processed_result = {
+                        'title': raw_result.title,
+                        'text': raw_result.text,
+                        'url': raw_result.url,
+                        'published_date': raw_result.published_date,
+                        'relevance_score': raw_result.score,
+                    }
+                    processed_results.append(processed_result)
+
+            final_result = {
+                'results': processed_results,
+                'query': query,
+                'purpose': purpose,
+                'question': question,
+            }
+
+            # Cache the result
+            await self._cache_result(cache_key, final_result)
+            return final_result
+
+        except Exception as e:
+            logger.error(f'Error processing research request: {e!s}')
+            raise
+
+    async def clear_cache(self) -> None:
+        """Clear the entire cache from the database."""
+        async with db() as session:
+            await session.execute(delete(Cache))
+            await session.commit()
+            logger.info('Cache cleared')

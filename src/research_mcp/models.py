@@ -1,6 +1,6 @@
 from typing import Literal
 
-from cleantext import clean
+from cleantext import clean  # type: ignore
 from pydantic import BaseModel, Field
 
 
@@ -71,10 +71,10 @@ class QueryResults(BaseModel):
     query_id: int
     query: ExaQuery
     raw_results: list[SearchResultItem]
-    summarized_results: list[SummarizedContent]
+    summarized_results: list[SummarizedContent] = Field(default_factory=list)
 
     class Config:
-        arbitrary_types_allowed = True  # Needed for ExaQuery which is still a dataclass
+        arbitrary_types_allowed = True
 
 
 class ResearchResults(BaseModel):

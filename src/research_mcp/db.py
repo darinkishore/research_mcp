@@ -1,10 +1,12 @@
+import asyncio
 import datetime
+import json
 import os
 from contextlib import asynccontextmanager
 
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 # Create async database engine - note the async sqlite driver
@@ -15,7 +17,7 @@ engine = create_async_engine(
 )
 
 # Create async sessionmaker
-AsyncSessionLocal = sessionmaker(
+AsyncSessionLocal = async_sessionmaker(
     engine,
     class_=AsyncSession,
     expire_on_commit=False,
@@ -24,9 +26,12 @@ AsyncSessionLocal = sessionmaker(
 )
 
 # Create base class for declarative models
-Base = declarative_base()
 
 # TODO: remove highlights
+
+
+class Base(DeclarativeBase):
+    pass
 
 
 class Result(Base):
@@ -57,12 +62,12 @@ class Result(Base):
 
     # Metadata
 
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.datetime.now(tz=datetime.UTC))
     updated_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.datetime.utcnow,
-        onupdate=datetime.datetime.utcnow,
+        default=datetime.datetime.now(tz=datetime.UTC),
+        onupdate=datetime.datetime.now(tz=datetime.UTC),
     )
 
     # Relationships
@@ -78,7 +83,7 @@ class ExaQuery(Base):
     query_text = Column(Text, nullable=False)
     category = Column(String, nullable=True)
     livecrawl = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.datetime.now(tz=datetime.UTC))
 
     # Relationships
     query_results = relationship('QueryResult', back_populates='exa_query', lazy='selectin')
@@ -97,17 +102,54 @@ class QueryResult(Base):
     result = relationship('Result', back_populates='query_results', lazy='selectin')
 
 
-# Async dependency for FastAPI
+class Cache(Base):
+    """Database model for caching research results."""
+
+    __tablename__ = 'cache'
+
+    # Cache key is a hash of the query parameters
+    key = Column(String, primary_key=True)
+
+    # Cache data
+    data = Column(Text, nullable=False)
+
+    # Cache metadata
+    created_at = Column(DateTime, nullable=False, default=datetime.datetime.now(tz=datetime.UTC))
+    expires_at = Column(DateTime, nullable=True)
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if the cache entry is expired."""
+        if self.expires_at is None:
+            return False
+        return bool(datetime.datetime.utcnow() > self.expires_at)
+
+    def to_dict(self) -> dict:
+        """Convert cache entry to dictionary."""
+        return {
+            'key': self.key,
+            'data': json.loads(str(self.data)),
+            'created_at': self.created_at.isoformat(),
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+        }
 
 
 @asynccontextmanager
 async def db():
-    """Async context manager for database sessions."""
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        except Exception:
-            raise
+    """Database session context manager."""
+    try:
+        async with AsyncSessionLocal() as session:
+            try:
+                yield session
+                await session.commit()
+            except asyncio.CancelledError:
+                await session.rollback()
+                raise
+            except Exception:
+                await session.rollback()
+                raise
+    except Exception:
+        raise
 
 
 # Create all tables asynchronously

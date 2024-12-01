@@ -2,10 +2,10 @@ import asyncio
 from typing import Union
 
 import dspy
-from research_mcp.tracing import traced
 
 from research_mcp.dspy_init import get_dspy_lm
 from research_mcp.models import QueryRequest, SearchResultItem, SummarizedContent
+from research_mcp.tracing import traced
 
 
 class ExtractContent(dspy.Signature):
@@ -43,7 +43,8 @@ def get_content_cleaner():
     global _lm, _content_cleaner
     if _content_cleaner is None:
         get_dspy_lm()  # Ensure DSPy is initialized
-        _content_cleaner = dspy.ChainOfThought(ExtractContent)
+        with dspy.context(lm=dspy.LM('openai/gpt-4o-mini')):
+            _content_cleaner = dspy.ChainOfThought(ExtractContent)
         _content_cleaner = dspy.asyncify(_content_cleaner)
     return _content_cleaner
 

@@ -105,7 +105,7 @@ def format_date(date_str: str | None) -> str | None:
 def format_result_summary(
     result_id: str,
     title: str,
-    author: str,
+    author: str | None,
     relevance_summary: str,
     summary: str,
     published_date: str | None = None,
@@ -113,12 +113,13 @@ def format_result_summary(
     """Format an individual result summary."""
     formatted_date = format_date(published_date)
     date_element = f'\n<date>{formatted_date}</date>' if formatted_date else ''
+    author_element = f'\n<author>{author}</author>' if author else ''
     return f"""\
 <result id="{result_id}">
 
 <title>{title}</title>
 {date_element}
-<author>{author}</author>
+{author_element}
 
 <relevance>
 {relevance_summary}
