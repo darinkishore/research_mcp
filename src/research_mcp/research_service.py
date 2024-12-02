@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 
@@ -16,9 +14,9 @@ if TYPE_CHECKING:
 
 from exa_py import Exa
 from exa_py.api import ResultWithText, SearchResponse
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
-from research_mcp.db import Cache, ExaQuery, QueryResult, Result, db
+from research_mcp.db import ExaQuery, QueryResult, Result, db
 from research_mcp.models import (
     ExaQuery as ExaQueryModel,
     QueryRequest,
@@ -34,8 +32,6 @@ from research_mcp.tracing import traced
 from research_mcp.word_ids import WordIDGenerator
 
 
-# braintrust span types: tool, task, scorer, eval, llm, function
-
 logger = logging.getLogger('research-mcp')
 
 
@@ -47,60 +43,11 @@ class ResearchService:
         exa_client: Exa,
         word_id_generator: WordIDGenerator,
         server: Server | None = None,
-        cache_enabled=True,
-        cache_ttl: timedelta | None = timedelta(days=7),
     ):
         self.exa = exa_client
         self.word_id_generator = word_id_generator
         self.exa_limiter = RateLimiter(rate=4)  # Slightly under 5/s to be safe
         self.server = server
-        self.cache_enabled = cache_enabled
-        self.cache_ttl = cache_ttl
-
-    def _build_cache_key(self, query: str, purpose: str, question: str) -> str:
-        """Build a cache key from query parameters."""
-        data = json.dumps(
-            {'query': query, 'purpose': purpose, 'question': question}, sort_keys=True
-        )
-        return hashlib.sha256(data.encode()).hexdigest()
-
-    async def _get_cached_result(self, cache_key: str) -> dict | None:
-        """Get cached result if it exists and is not expired."""
-        if not self.cache_enabled:
-            return None
-
-        async with db() as session:
-            result = await session.execute(select(Cache).where(Cache.key == cache_key))
-            cache_entry = result.scalar_one_or_none()
-
-            if cache_entry is None:
-                return None
-
-            if cache_entry.is_expired:
-                await session.delete(cache_entry)
-                await session.commit()
-                return None
-
-            return json.loads(cache_entry.data)
-
-    async def _cache_result(self, cache_key: str, result: dict) -> None:
-        """Cache a result in the database."""
-        if not self.cache_enabled:
-            return
-
-        async with db() as session:
-            # Calculate expiration time if TTL is set
-            expires_at = None
-            if self.cache_ttl:
-                expires_at = datetime.utcnow() + self.cache_ttl
-
-            # Create new cache entry
-            cache_entry = Cache(key=cache_key, data=json.dumps(result), expires_at=expires_at)
-
-            # Merge in case key already exists
-            await session.merge(cache_entry)
-            await session.commit()
-            logger.debug(f'Cached result for key: {cache_key}')
 
     @traced(type='function')
     async def perform_search(
@@ -324,56 +271,3 @@ class ResearchService:
         except Exception as e:
             print(f'Research error: {e}', file=sys.stderr)
             raise
-
-    async def process_research_request(self, request: dict) -> dict:
-        """Process a research request with persistent caching."""
-        query = request.get('query', '')
-        purpose = request.get('purpose', '')
-        question = request.get('question', '')
-
-        cache_key = self._build_cache_key(query, purpose, question)
-
-        # Check cache first
-        cached_result = await self._get_cached_result(cache_key)
-        if cached_result:
-            logger.info(f'Cache hit for query: {query}')
-            return cached_result
-
-        logger.info(f'Cache miss for query: {query}')
-        try:
-            # Existing research logic
-            results = await self.research(purpose, question)
-
-            processed_results = []
-            for query_result in results.query_results:
-                for raw_result in query_result.raw_results:
-                    processed_result = {
-                        'title': raw_result.title,
-                        'text': raw_result.text,
-                        'url': raw_result.url,
-                        'published_date': raw_result.published_date,
-                        'relevance_score': raw_result.score,
-                    }
-                    processed_results.append(processed_result)
-
-            final_result = {
-                'results': processed_results,
-                'query': query,
-                'purpose': purpose,
-                'question': question,
-            }
-
-            # Cache the result
-            await self._cache_result(cache_key, final_result)
-            return final_result
-
-        except Exception as e:
-            logger.error(f'Error processing research request: {e!s}')
-            raise
-
-    async def clear_cache(self) -> None:
-        """Clear the entire cache from the database."""
-        async with db() as session:
-            await session.execute(delete(Cache))
-            await session.commit()
-            logger.info('Cache cleared')
