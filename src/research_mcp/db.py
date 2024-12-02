@@ -1,6 +1,4 @@
 import asyncio
-import datetime
-import json
 import os
 from contextlib import asynccontextmanager
 
@@ -25,11 +23,8 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
+
 # Create base class for declarative models
-
-# TODO: remove highlights
-
-
 class Base(DeclarativeBase):
     pass
 
@@ -61,7 +56,6 @@ class Result(Base):
     published_date = Column(Text, nullable=True)
 
     # Metadata
-
     created_at = Column(DateTime, nullable=False, default=datetime.datetime.now(tz=datetime.UTC))
     updated_at = Column(
         DateTime,
@@ -102,38 +96,6 @@ class QueryResult(Base):
     result = relationship('Result', back_populates='query_results', lazy='selectin')
 
 
-class Cache(Base):
-    """Database model for caching research results."""
-
-    __tablename__ = 'cache'
-
-    # Cache key is a hash of the query parameters
-    key = Column(String, primary_key=True)
-
-    # Cache data
-    data = Column(Text, nullable=False)
-
-    # Cache metadata
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.now(tz=datetime.UTC))
-    expires_at = Column(DateTime, nullable=True)
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if the cache entry is expired."""
-        if self.expires_at is None:
-            return False
-        return bool(datetime.datetime.utcnow() > self.expires_at)
-
-    def to_dict(self) -> dict:
-        """Convert cache entry to dictionary."""
-        return {
-            'key': self.key,
-            'data': json.loads(str(self.data)),
-            'created_at': self.created_at.isoformat(),
-            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
-        }
-
-
 @asynccontextmanager
 async def db():
     """Database session context manager."""
@@ -156,7 +118,3 @@ async def db():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-
-# Run this when starting your application
-# await init_db()
