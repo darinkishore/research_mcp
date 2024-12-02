@@ -48,6 +48,8 @@ class ResearchService:
         self.word_id_generator = word_id_generator
         self.exa_limiter = RateLimiter(rate=4)  # Slightly under 5/s to be safe
         self.server = server
+        self.write_semaphore = asyncio.Semaphore(1)  # Limit concurrent writes to 1
+        self.background_tasks: set[asyncio.Task] = set()  # Keep track of background tasks
 
     @traced(type='function')
     async def perform_search(
@@ -92,16 +94,8 @@ class ResearchService:
     @traced(type='tool')
     async def process_search_query(self, search_query: ExaQueryModel) -> QueryResults:
         """Process a single search query and return the raw results."""
-        # Store query in database
-        async with db() as session:
-            db_query = ExaQuery(
-                query_text=search_query.text,
-                category=search_query.category,
-                livecrawl=search_query.livecrawl,
-            )
-            session.add(db_query)
-            await session.commit()
-            query_id = db_query.id
+        # Store query in database asynchronously
+        query_id = await self.store_exa_query(search_query)
 
         # Execute search
         exa_results = await self.perform_search(
@@ -131,72 +125,86 @@ class ResearchService:
             summarized_results=[],  # Will be filled later
         )
 
+    async def store_exa_query(self, search_query: ExaQueryModel) -> int:
+        """Store ExaQuery in the database asynchronously."""
+        async with self.write_semaphore:
+            async with db() as session:
+                db_query = ExaQuery(
+                    query_text=search_query.text,
+                    category=search_query.category,
+                    livecrawl=search_query.livecrawl,
+                )
+                session.add(db_query)
+                await session.commit()
+                query_id = db_query.id
+                return query_id
+
     async def store_results(self, research_results: ResearchResults, purpose: str, question: str):
         """Store all results in the database."""
-        async with db() as session:
-            result_ids: set[str] = set()
-            for query_result in research_results.query_results:
-                result_ids.update(r.id for r in query_result.raw_results)
+        async with self.write_semaphore:
+            async with db() as session:
+                result_ids: set[str] = set()
+                for query_result in research_results.query_results:
+                    result_ids.update(r.id for r in query_result.raw_results)
 
-            # Fetch existing results and links
-            existing_results_stmt = select(Result).where(Result.id.in_(result_ids))
-            existing_results = (await session.execute(existing_results_stmt)).scalars().all()
-            existing_result_ids = {r.id for r in existing_results}
+                # Fetch existing results and links
+                existing_results_stmt = select(Result).where(Result.id.in_(result_ids))
+                existing_results = (await session.execute(existing_results_stmt)).scalars().all()
+                existing_result_ids = {r.id for r in existing_results}
 
-            # Create a mapping of result_id to summarized_content for easier lookup
-            summarized_by_id = {}
-            for query_result in research_results.query_results:
-                for raw_result, summarized_result in zip(
-                    query_result.raw_results, query_result.summarized_results, strict=False
-                ):
-                    if summarized_result and summarized_result.id == raw_result.id:
-                        summarized_by_id[raw_result.id] = summarized_result
+                # Create a mapping of result_id to summarized_content for easier lookup
+                summarized_by_id = {}
+                for query_result in research_results.query_results:
+                    for raw_result, summarized_result in zip(
+                        query_result.raw_results, query_result.summarized_results, strict=False
+                    ):
+                        if summarized_result and summarized_result.id == raw_result.id:
+                            summarized_by_id[raw_result.id] = summarized_result
 
-            # Prepare new results and links
-            new_results = []
-            new_links = []
-            for query_result in research_results.query_results:
-                for raw_result in query_result.raw_results:
-                    # Type-safe way to get summarized_result
-                    summarized_result = summarized_by_id.get(raw_result.id)
-                    if not summarized_result:
-                        continue
+                # Prepare new results and links
+                new_results = []
+                new_links = []
+                for query_result in research_results.query_results:
+                    for raw_result in query_result.raw_results:
+                        # Type-safe way to get summarized_result
+                        summarized_result = summarized_by_id.get(raw_result.id)
+                        if not summarized_result:
+                            continue
 
-                    # Now TypeScript knows summarized_result is not None
-                    if raw_result.id not in existing_result_ids:
-                        new_result = Result(
-                            id=raw_result.id,
-                            title=raw_result.title or None,
-                            author=raw_result.author or None,
-                            url=raw_result.url or None,
-                            dense_summary=summarized_result.dense_summary,
-                            relevance_summary=summarized_result.relevance_summary,
-                            text=raw_result.text,
-                            relevance_score=raw_result.score,
-                            query_purpose=purpose,
-                            query_question=question,
-                            published_date=raw_result.published_date,
+                        if raw_result.id not in existing_result_ids:
+                            new_result = Result(
+                                id=raw_result.id,
+                                title=raw_result.title or None,
+                                author=raw_result.author or None,
+                                url=raw_result.url or None,
+                                dense_summary=summarized_result.dense_summary,
+                                relevance_summary=summarized_result.relevance_summary,
+                                text=raw_result.text,
+                                relevance_score=raw_result.score,
+                                query_purpose=purpose,
+                                query_question=question,
+                                published_date=raw_result.published_date,
+                            )
+                            new_results.append(new_result)
+                        else:
+                            # Update existing result's updated_at timestamp
+                            existing_result = next(
+                                (res for res in existing_results if res.id == raw_result.id), None
+                            )
+                            if existing_result:
+                                existing_result.updated_at = datetime.now(UTC)
+
+                        # Prepare link between query and result
+                        new_links.append(
+                            QueryResult(query_id=query_result.query_id, result_id=raw_result.id)
                         )
-                        new_results.append(new_result)
-                    else:
-                        # Update existing result's updated_at timestamp
-                        existing_result = next(
-                            (res for res in existing_results if res.id == raw_result.id), None
-                        )
-                        if existing_result:
-                            existing_result.updated_at = datetime.now(UTC)
 
-                    # Prepare link between query and result
-                    new_links.append(
-                        QueryResult(query_id=query_result.query_id, result_id=raw_result.id)
-                    )
-
-            # Bulk save new results and links
-            if new_results:
-                session.add_all(new_results)
-            if new_links:
-                session.add_all(new_links)
-            await session.commit()
+                # Bulk save new results and links
+                if new_results:
+                    session.add_all(new_results)
+                if new_links:
+                    session.add_all(new_links)
+                await session.commit()
 
     async def list_resources(self, limit: int = 25) -> list[Result]:
         """List available result resources, focusing on most relevant and recent."""
@@ -237,11 +245,9 @@ class ResearchService:
             # Initialize research results container with empty query_results
             research_results = ResearchResults(purpose=purpose, question=question, query_results=[])
 
-            # Process each query sequentially to avoid database concurrency issues
-            # Process all search queries concurrently
+            # Process search queries concurrently
             query_tasks = [self.process_search_query(query) for query in search_queries]
             query_results = await asyncio.gather(*query_tasks)
-
             research_results.query_results = query_results
 
             # Process content cleaning concurrently
@@ -261,13 +267,16 @@ class ResearchService:
             for query_result, cleaned_result in zip(
                 research_results.query_results, cleaned_results, strict=True
             ):
-                # Explicitly set the summarized_results with proper typing
                 query_result.summarized_results = cleaned_result
 
-            # Store results
-            await self.store_results(research_results, purpose, question)
+            # Schedule database writes as a background task
+            write_task = asyncio.create_task(
+                self.store_results(research_results, purpose, question)
+            )
+            self.background_tasks.add(write_task)
+            write_task.add_done_callback(self.background_tasks.discard)
 
-            return research_results
+            return research_results  # Return to client immediately
         except Exception as e:
             print(f'Research error: {e}', file=sys.stderr)
             raise
