@@ -1,49 +1,41 @@
-"""Rate limiter for API calls."""
-
-from __future__ import annotations
-
 import asyncio
-from collections import deque
-from time import time
+import logging
+import time
+
+
+logger = logging.getLogger('rate_limiter')
 
 
 class RateLimiter:
-    """Token bucket rate limiter."""
+    """Asynchronous rate limiter that limits the rate of actions per period."""
 
-    def __init__(self, rate: float, burst: int = 1):
-        """Initialize rate limiter.
-
-        Args:
-            rate: Tokens per second
-            burst: Maximum number of tokens that can be accumulated
-        """
-        self.rate = rate  # tokens per second
-        self.burst = burst  # max tokens
-        self.tokens = burst  # current tokens
-        self.last_update = time()
+    def __init__(self, max_calls: int, period: float):
+        self.max_calls = max_calls
+        self.period = period
         self.lock = asyncio.Lock()
-        # Track request timestamps for debugging
-        self.request_times = deque(maxlen=100)
+        self.tokens = max_calls
+        self.updated_at = time.monotonic()
 
     async def acquire(self):
-        """Acquire a token, waiting if necessary."""
         async with self.lock:
-            now = time()
-            time_passed = now - self.last_update
-            self.tokens = min(self.burst, self.tokens + time_passed * self.rate)
-            self.last_update = now
+            now = time.monotonic()
+            elapsed = now - self.updated_at
+            self.updated_at = now
+            # Refill tokens based on the elapsed time
+            self.tokens += elapsed * (self.max_calls / self.period)
+            self.tokens = min(self.tokens, self.max_calls)
 
-            if self.tokens < 1:
-                wait_time = (1 - self.tokens) / self.rate
-                await asyncio.sleep(wait_time)
-                self.tokens = 1  # We've waited long enough for one token
-                self.last_update = time()
+            if self.tokens >= 1:
+                self.tokens -= 1
+                logger.debug(f'Token acquired. Tokens left: {self.tokens}')
+                return
 
-            self.tokens -= 1
-            self.request_times.append(time())
+            # Calculate the time to wait
+            wait_time = (1 - self.tokens) * (self.period / self.max_calls)
+            logger.debug(f'Rate limit reached. Waiting for {wait_time:.2f} seconds.')
 
-    def get_request_rate(self, window: float = 1.0) -> float:
-        """Calculate current request rate over window seconds."""
-        now = time()
-        recent = [t for t in self.request_times if now - t <= window]
-        return len(recent) / window if recent else 0
+            # Add small delay to prevent tight loops
+            await asyncio.sleep(max(0.03, wait_time))
+            self.tokens = 0
+            self.updated_at = time.monotonic()
+            logger.debug('Resuming after wait.')

@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 
 import dotenv
 import mcp
-import stackprinter
+import stackprinter  # type: ignore
 from braintrust import current_span, init_logger, traced
 from exa_py import Exa
 from mcp import types
@@ -67,6 +66,7 @@ async def handle_list_resources() -> list[types.Resource]:
 
         return resources
     except Exception:
+        logger.error('Error listing resources', exc_info=True)
         raise
 
 
@@ -77,17 +77,24 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         if not uri.scheme == 'research':
             raise ValueError(f'Unsupported URI scheme: {uri.scheme}')
 
-        result_id = uri.path.strip('/').split('/')[-1]
+        # Ensure path exists and is a string
+        path = uri.path
+        if not isinstance(path, str):
+            raise ValueError('URI path must be a string')
+
+        result_id = path.strip('/').split('/')[-1]
         result = await research_service.get_resource(result_id)
 
+        # Convert SQLAlchemy Column types to strings
         return format_resource_content(
-            result_id=result.id,
-            title=result.title,
-            author=clean_author(result.author),
-            content=result.text,
-            published_date=result.published_date,
+            result_id=str(result.id),
+            title=str(result.title),
+            author=clean_author(str(result.author) if result.author else None),
+            content=str(result.text),
+            published_date=str(result.published_date) if result.published_date else None,
         )
     except Exception:
+        logger.error('Error reading resource', exc_info=True)
         raise
 
 
@@ -126,7 +133,7 @@ async def handle_list_tools() -> list[types.Tool]:
 
 
 @server.call_tool()
-@traced(type='task')
+@traced(type='task')  # type: ignore
 async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
     """Handle research tool execution."""
     try:
@@ -143,7 +150,13 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 raise ValueError('Missing purpose or question')
 
             # Use research service to perform the search
-            research_results = await research_service.research(purpose=purpose, question=question)
+            try:
+                research_results = await research_service.research(
+                    purpose=purpose, question=question
+                )
+            except Exception:
+                logger.error('Error performing research', exc_info=True)
+                raise
 
             # Generate summaries for output, grouped by query
             summaries = []
@@ -184,36 +197,53 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             current_span().set_attributes(name=f'tool.{name}')
 
             if not arguments or 'result_ids' not in arguments:
+                logger.error('Missing result_ids argument')
                 raise ValueError('Missing result_ids argument')
 
             result_ids = arguments['result_ids']
             if not isinstance(result_ids, list):
+                logger.error(f'Invalid result_ids type: {type(result_ids)}')
                 raise ValueError('result_ids must be a list')
 
-            # Use research service to get full texts
-            results = await research_service.get_full_texts(result_ids)
+            logger.info(f'Fetching full texts for IDs: {result_ids}')
 
-            # Format results using the schema formatter
-            formatted_results = [
-                {
-                    'id': result.id,
-                    'title': result.title,
-                    'author': result.author,  # Don't truncate for full text view
-                    'content': result.text,
-                    'published_date': result.published_date,
-                }
-                for result in results
-            ]
+            try:
+                results = await research_service.get_full_texts(result_ids)
+                logger.info(f'Successfully retrieved {len(results)} results')
+            except Exception as e:
+                logger.error(f'Error retrieving full texts: {e!s}', exc_info=True)
+                raise
 
-            combined_text = format_full_texts_response(formatted_results)
+            try:
+                formatted_results = [
+                    {
+                        'id': str(result.id),
+                        'title': str(result.title),
+                        'author': str(result.author) if result.author else None,
+                        'content': str(result.text),
+                        'published_date': str(result.published_date)
+                        if result.published_date
+                        else None,
+                    }
+                    for result in results
+                ]
+                logger.info(f'Successfully formatted {len(formatted_results)} results')
+            except Exception as e:
+                logger.error(f'Error formatting results: {e!s}', exc_info=True)
+                raise
 
-            return [types.TextContent(type='text', text=combined_text)]
+            try:
+                combined_text = format_full_texts_response(formatted_results)
+                return [types.TextContent(type='text', text=combined_text)]
+            except Exception as e:
+                logger.error(f'Error in format_full_texts_response: {e!s}', exc_info=True)
+                raise
 
         else:
             raise ValueError(f'Unknown tool: {name}')
-
     except Exception as e:
-        raise e
+        logger.error(f'Tool execution failed: {e!s}', exc_info=True)
+        return [types.TextContent(type='text', text=f'Error: Tool execution failed - {e!s}')]
 
 
 def clean_author(author: str | None) -> str | None:
@@ -256,8 +286,7 @@ async def main():
                 init_options,
             )
         except Exception as e:
-            print(f'Server error: {e}', file=sys.stderr)
-            raise
+            logger.error(f'Server error: {e}', exc_info=True)
 
 
 if __name__ == '__main__':

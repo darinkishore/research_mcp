@@ -3,7 +3,7 @@ import datetime
 import os
 from contextlib import asynccontextmanager
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -14,6 +14,32 @@ engine = create_async_engine(
     DATABASE_URL,
     future=True,
 )
+
+
+# Create async database engine - note the async sqlite driver
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///results.db')
+engine = create_async_engine(
+    DATABASE_URL,
+    future=True,
+    connect_args={
+        'check_same_thread': False,
+    },
+)
+
+
+# Set journal_mode to WAL upon connection
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    # dbapi_connection is a synchronous connection
+    cursor = dbapi_connection.cursor()
+    cursor.execute('PRAGMA journal_mode=WAL')
+    cursor.close()
+
+
+# Listen for the 'connect' event to set PRAGMA
+
+
+event.listen(engine.sync_engine, 'connect', set_sqlite_pragma)
+
 
 # Create async sessionmaker
 AsyncSessionLocal = async_sessionmaker(
