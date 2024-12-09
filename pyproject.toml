@@ -6,9 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20.0",
-    "async-lru>=2.0.4",
     "braintrust>=0.0.173",
-    "cachier>=3.1.2",
     "clean-text[gpl]>=0.6.0",
     "dspy>=2.5.40",
     "exa-py>=1.7.0",
@@ -18,7 +16,7 @@ dependencies = [
     "pip>=24.3.1",
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.17",
-    "rich>=13.9.4",
+    "returns>=0.24.0",
     "sqlalchemy[asyncio]>=2.0.36",
     "stackprinter>=0.2.12",
     "tenacity>=9.0.0",
@@ -108,6 +106,7 @@ dev = [
     "memray>=1.11.0",         # Memory profiling
     "pyinstrument>=4.6.2",    # CPU profiling
     "vulture>=2.11",          # Find dead code
+    "mypy>=1.13.0",
 ]
 
 [tool.mypy]

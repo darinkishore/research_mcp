@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from research_mcp.db import Result, db
 
+
 # Paths to the adjective and noun files
 ADJECTIVES_FILE = Path(__file__).parent / 'adjectives.txt'
 NOUNS_FILE = Path(__file__).parent / 'nouns.txt'
@@ -21,7 +22,7 @@ class WordIDGenerator:
             words = [line.strip().lower() for line in f if line.strip()]
         return words
 
-    async def generate_result_id(self):
+    async def generate_result_id(self) -> str:
         while True:
             adj = random.choice(self.adjectives)
             noun = random.choice(self.nouns)

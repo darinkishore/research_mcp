@@ -2,6 +2,7 @@ import multiprocessing
 
 import dspy
 
+
 DEFAULT_WORKERS = min(multiprocessing.cpu_count() * 2, 32)
 
 # Initialize DSPy with GPT-4
