@@ -33,3 +33,4 @@ ensure both EXA and OPENAI API keys are set. Braintrust optional.
 
 
 
+blog post abt development: https://www.darinkishore.com/posts/mcp#building-tools-that-learn
